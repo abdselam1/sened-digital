@@ -181,7 +181,8 @@ const I18N = {
     customModel: 'نموذج آخر (اكتب الاسم)',
     developerCredit: 'تصميم وتطوير وبرمجة: محمد عبد السلام',
     csvExported: 'تم تصدير الملف ✓',
-    weeklySummary: 'ملخص مبيعات الأسبوع'
+    weeklySummary: 'ملخص مبيعات الأسبوع',
+    overdraftWarn: 'تحذير: سيصبح رصيد المحفظة سالباً بعد هذه العملية. هل تريد المتابعة؟ الرصيد الجديد سيكون'
   },
   fr: {
     dir: 'ltr',
@@ -364,7 +365,8 @@ const I18N = {
     customModel: 'Autre modèle (nom personnalisé)',
     developerCredit: 'Conçu, développé et programmé par : Mohamed Abdelsalam',
     csvExported: 'Fichier exporté ✓',
-    weeklySummary: 'Résumé des ventes de la semaine'
+    weeklySummary: 'Résumé des ventes de la semaine',
+    overdraftWarn: 'Attention : le solde du compte deviendra négatif. Continuer ? Nouveau solde'
   },
   en: {
     dir: 'ltr',
@@ -547,6 +549,7 @@ const I18N = {
     customModel: 'Other model (custom name)',
     developerCredit: 'Designed, developed and programmed by: Mohamed Abdelsalam',
     csvExported: 'File exported ✓',
-    weeklySummary: "This week's sales summary"
+    weeklySummary: "This week's sales summary",
+    overdraftWarn: 'Warning: this wallet balance will go negative. Continue? New balance'
   }
 };

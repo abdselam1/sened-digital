@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('sened', {
   print: () => ipcRenderer.invoke('app:print'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   onTgStatus: (cb) => ipcRenderer.on('tg-status', (e, s) => cb(s)),
+  onAiChunk: (cb) => ipcRenderer.on('ai:chunk', (e, delta) => cb(delta)),
+  onAiReset: (cb) => ipcRenderer.on('ai:reset', () => cb()),
   authVerify: (username, password) => ipcRenderer.invoke('auth:verify', { username, password }),
   authSetCredentials: (username, password) => ipcRenderer.invoke('auth:setCredentials', { username, password })
 });

@@ -8,14 +8,19 @@ const crypto = require('crypto');
 let win = null;
 const DATA_FILE = () => path.join(app.getPath('userData'), 'sened-data.json');
 
-function hashPass(p) { return crypto.createHash('sha256').update(String(p)).digest('hex'); }
+// كلمة المرور تُخزَّن كـ sha256(ملح + كلمة المرور)؛ الملح يُولَّد عشوائياً لكل تنصيب.
+// ملفات بيانات قديمة (قبل هذا التحديث) لا تحتوي "salt" — نتحقق منها بالنمط القديم غير المملَّح للتوافق.
+function hashPass(p, salt) { return crypto.createHash('sha256').update((salt || '') + String(p)).digest('hex'); }
+function randomSalt() { return crypto.randomBytes(16).toString('hex'); }
+
+const FRESH_AUTH_SALT = randomSalt();
 
 // ---------- التخزين ----------
 const DEFAULT_DATA = {
   settings: {
     lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '',
     aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
-    auth: { enabled: false, username: 'admin', passwordHash: hashPass('admin123') },
+    auth: { enabled: false, username: 'admin', salt: FRESH_AUTH_SALT, passwordHash: hashPass('admin123', FRESH_AUTH_SALT) },
     company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
     notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' }
   },
@@ -29,11 +34,16 @@ function loadData() {
   try {
     if (fs.existsSync(DATA_FILE())) {
       const saved = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
+      const savedAuth = (saved.settings && saved.settings.auth) || null;
+      // الملح وبصمة كلمة المرور يجب أن يبقيا زوجاً من نفس المصدر دائماً — لا نخلط ملحاً محفوظاً ببصمة افتراضية أو العكس
+      const auth = (savedAuth && savedAuth.passwordHash)
+        ? { enabled: !!savedAuth.enabled, username: savedAuth.username || 'admin', salt: savedAuth.salt, passwordHash: savedAuth.passwordHash }
+        : { ...DEFAULT_DATA.settings.auth, enabled: !!(savedAuth && savedAuth.enabled), username: (savedAuth && savedAuth.username) || 'admin' };
       return {
         ...DEFAULT_DATA, ...saved,
         settings: {
           ...DEFAULT_DATA.settings, ...saved.settings,
-          auth: { ...DEFAULT_DATA.settings.auth, ...(saved.settings && saved.settings.auth) },
+          auth,
           company: { ...DEFAULT_DATA.settings.company, ...(saved.settings && saved.settings.company) },
           notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) }
         },
@@ -48,20 +58,42 @@ function saveData(data) {
   fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8');
 }
 
+// يقرأ استجابة HTTP سطراً سطراً (NDJSON أو SSE)، ويُفرِّغ آخر سطر متبقٍ عند إغلاق
+// الاتصال حتى لو وصل بلا "\n" ختامي — وإلا يُفقَد آخر جزء من الرد بصمت.
+function readLines(res, onLine) {
+  let buf = '';
+  res.on('data', chunk => {
+    buf += chunk.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) onLine(line);
+  });
+  res.on('end', () => { if (buf.trim()) onLine(buf); });
+}
+
 // ---------- أولاما (الذكاء الاصطناعي المحلي) ----------
-function askOllama(model, messages) {
+// stream:true + num_predict bound + keep_alive: يقلل زمن أول استجابة ويمنع الإطالة غير الضرورية
+function askOllama(model, messages, onChunk) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model, messages, stream: false });
+    const body = JSON.stringify({
+      model, messages, stream: true,
+      keep_alive: '30m',
+      options: { num_predict: 400, temperature: 0.4 }
+    });
     const req = http.request({
       hostname: '127.0.0.1', port: 11434, path: '/api/chat', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 120000
     }, res => {
-      let out = '';
-      res.on('data', c => out += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(out).message.content); }
-        catch (e) { reject(new Error('OLLAMA_PARSE')); }
+      let full = '';
+      readLines(res, line => {
+        if (!line.trim()) return;
+        try {
+          const j = JSON.parse(line);
+          const delta = j.message && j.message.content;
+          if (delta) { full += delta; if (onChunk) onChunk(delta); }
+        } catch (e) { /* سطر غير مكتمل، تجاهله */ }
       });
+      res.on('end', () => { full ? resolve(full) : reject(new Error('OLLAMA_PARSE')); });
     });
     req.on('error', () => reject(new Error('OLLAMA_OFFLINE')));
     req.on('timeout', () => { req.destroy(); reject(new Error('OLLAMA_TIMEOUT')); });
@@ -70,12 +102,12 @@ function askOllama(model, messages) {
 }
 
 // ---------- Claude API (اختياري إن وُضع مفتاح) ----------
-function askClaude(key, messages) {
+function askClaude(key, messages, onChunk) {
   return new Promise((resolve, reject) => {
     const system = messages.find(m => m.role === 'system');
     const rest = messages.filter(m => m.role !== 'system');
     const body = JSON.stringify({
-      model: 'claude-sonnet-5', max_tokens: 1024,
+      model: 'claude-sonnet-5', max_tokens: 500, stream: true,
       system: system ? system.content : undefined, messages: rest
     });
     const req = https.request({
@@ -85,14 +117,20 @@ function askClaude(key, messages) {
         'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body)
       }, timeout: 60000
     }, res => {
-      let out = '';
-      res.on('data', c => out += c);
-      res.on('end', () => {
+      let full = '', gotError = null;
+      readLines(res, line => {
+        if (!line.startsWith('data: ')) return;
         try {
-          const j = JSON.parse(out);
-          if (j.content && j.content[0]) resolve(j.content[0].text);
-          else reject(new Error(j.error ? j.error.message : 'CLAUDE_ERROR'));
-        } catch (e) { reject(e); }
+          const j = JSON.parse(line.slice(6));
+          if (j.type === 'content_block_delta' && j.delta && j.delta.text) {
+            full += j.delta.text; if (onChunk) onChunk(j.delta.text);
+          } else if (j.type === 'error') { gotError = j.error && j.error.message; }
+        } catch (e) { /* سطر غير مكتمل */ }
+      });
+      res.on('end', () => {
+        if (gotError) reject(new Error(gotError));
+        else if (full) resolve(full);
+        else reject(new Error('CLAUDE_ERROR'));
       });
     });
     req.on('error', reject);
@@ -123,8 +161,7 @@ function computeFinancials(d) {
   return { totalSales, totalCogs, totalExpenses, netProfit, totalPercent, totalWithdrawals, totalWalletBalance };
 }
 
-function businessContext() {
-  const d = loadData();
+function businessContext(d) {
   const f = computeFinancials(d);
   const today = new Date().toISOString().slice(0, 10);
   const todaySales = d.invoices.filter(i => i.date.slice(0, 10) === today).reduce((s, i) => s + i.total, 0);
@@ -146,13 +183,20 @@ function businessContext() {
 - أحدث 5 فواتير: ${d.invoices.slice(-5).map(i => `#${i.number} ${i.customerName || 'زبون'} = ${i.total}`).join(' | ') || 'لا يوجد'}`;
 }
 
-async function askAI(userText, history = []) {
-  const d = loadData();
-  const messages = [{ role: 'system', content: businessContext() }, ...history, { role: 'user', content: userText }];
+// preloadedData: تمرير بيانات مُحمَّلة مسبقاً (مثلاً من بوت تلجرام) لتفادي قراءة ملف البيانات من القرص مرتين لكل رسالة.
+// onReset: يُستدعى إن بدأ Claude ببث نص جزئي ثم فشل، قبل التراجع إلى أولاما — لمسح النص الجزئي من الواجهة بدل دمجه مع رد مختلف.
+async function askAI(userText, history = [], onChunk, preloadedData, onReset) {
+  const d = preloadedData || loadData();
+  const messages = [{ role: 'system', content: businessContext(d) }, ...history, { role: 'user', content: userText }];
   if (d.settings.anthropicKey) {
-    try { return await askClaude(d.settings.anthropicKey, messages); } catch (e) { /* جرّب أولاما */ }
+    let emittedAny = false;
+    try {
+      return await askClaude(d.settings.anthropicKey, messages, delta => { emittedAny = true; if (onChunk) onChunk(delta); });
+    } catch (e) {
+      if (emittedAny && onReset) onReset();
+    }
   }
-  return await askOllama(d.settings.aiModel || 'qwen2:latest', messages);
+  return await askOllama(d.settings.aiModel || 'qwen2:latest', messages, onChunk);
 }
 
 // ---------- بوت تلجرام ----------
@@ -219,7 +263,7 @@ async function tgHandle(msg) {
       ? '🏦 المحافظ والحسابات:\n\n' + d.wallets.map(w => `• ${w.name} (${w.type}): ${Math.round(walletBalance(d, w.id))} ${c}`).join('\n')
       : 'لا توجد محافظ مسجلة بعد.';
   } else if (text) {
-    try { reply = await askAI(text); }
+    try { reply = await askAI(text, [], null, d); }
     catch (e) { reply = '⚠️ الذكاء الاصطناعي غير متاح حالياً. تأكد من تشغيل أولاما على الجهاز.'; }
   }
   if (reply) await tgApi('sendMessage', { chat_id: chatId, text: reply });
@@ -247,8 +291,15 @@ async function tgLoop() {
 ipcMain.handle('data:load', () => loadData());
 ipcMain.handle('data:save', (e, data) => { saveData(data); return true; });
 ipcMain.handle('ai:ask', async (e, { text, history }) => {
-  try { return { ok: true, text: await askAI(text, history || []) }; }
-  catch (err) { return { ok: false, error: err.message }; }
+  try {
+    const full = await askAI(
+      text, history || [],
+      delta => { if (!e.sender.isDestroyed()) e.sender.send('ai:chunk', delta); },
+      undefined,
+      () => { if (!e.sender.isDestroyed()) e.sender.send('ai:reset'); }
+    );
+    return { ok: true, text: full };
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('ai:check', async () => {
   return new Promise(resolve => {
@@ -274,12 +325,19 @@ ipcMain.handle('app:print', () => { if (win) win.webContents.print({ silent: fal
 ipcMain.handle('app:openExternal', (e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
-  return d.settings.auth.username === username && d.settings.auth.passwordHash === hashPass(password);
+  if (d.settings.auth.username !== username) return false;
+  const expected = d.settings.auth.salt
+    ? hashPass(password, d.settings.auth.salt)
+    : hashPass(password); // نمط قديم غير مملّح، لتوافق البيانات المحفوظة سابقاً
+  return d.settings.auth.passwordHash === expected;
 });
 ipcMain.handle('auth:setCredentials', (e, { username, password }) => {
   const d = loadData();
   d.settings.auth.username = username;
-  if (password) d.settings.auth.passwordHash = hashPass(password);
+  if (password) {
+    d.settings.auth.salt = randomSalt();
+    d.settings.auth.passwordHash = hashPass(password, d.settings.auth.salt);
+  }
   saveData(d);
   return true;
 });

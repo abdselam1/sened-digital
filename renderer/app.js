@@ -30,6 +30,8 @@ const bridge = window.sened || {
   tgStop: async () => true,
   print: async () => window.print(),
   onTgStatus: () => {},
+  onAiChunk: () => {},
+  onAiReset: () => {},
   authVerify: async () => true,
   authSetCredentials: async () => true
 };
@@ -110,6 +112,44 @@ document.querySelectorAll('.nav-item').forEach(item => {
 function openModal(html) { $('modalBox').innerHTML = html; $('modalBg').classList.add('open'); }
 function closeModal() { $('modalBg').classList.remove('open'); }
 $('modalBg').addEventListener('click', e => { if (e.target === $('modalBg')) closeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if ($('modalBg').classList.contains('open')) closeModal();
+    else if ($('lockScreen').classList.contains('open')) { /* لا يُغلق بدون كلمة مرور */ }
+  }
+});
+
+// ---------- تأثير التموّج عند الضغط على الأزرار ----------
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.btn');
+  if (!btn) return;
+  const r = btn.getBoundingClientRect();
+  const ripple = document.createElement('span');
+  const size = Math.max(r.width, r.height) * 1.4;
+  ripple.className = 'btn-ripple';
+  ripple.style.width = ripple.style.height = size + 'px';
+  ripple.style.left = (e.clientX - r.left - size / 2) + 'px';
+  ripple.style.top = (e.clientY - r.top - size / 2) + 'px';
+  btn.appendChild(ripple);
+  ripple.addEventListener('animationend', () => ripple.remove());
+});
+
+// ---------- عدّاد الأرقام المتحرك ----------
+function animateCounters(containerId) {
+  document.querySelectorAll(`#${containerId} .c-value[data-val]`).forEach(el => {
+    const target = parseFloat(el.dataset.val) || 0;
+    const suffix = el.dataset.suffix || '';
+    const start = performance.now();
+    const dur = 650;
+    (function step(now) {
+      const p = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = fmt(target * eased) + suffix;
+      if (p < 1) requestAnimationFrame(step);
+      else el.textContent = fmt(target) + suffix;
+    })(start);
+  });
+}
 
 // ---------- الحسابات المالية ----------
 function financials() {
@@ -155,12 +195,13 @@ function renderDashboard() {
   const f = financials();
   const low = DB.products.filter(isLow).length;
   $('dashCards').innerHTML = `
-    <div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value">${fmt(todaySales)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value">${fmt(f.totalSales)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value">${fmt(f.netProfit)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value">${fmt(f.custDebt)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value">${fmt(f.totalWalletBalance)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value">${low}</div></div>`;
+    <div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value" data-val="${todaySales}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value" data-val="${f.custDebt}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value" data-val="${f.totalWalletBalance}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value" data-val="${low}">0</div></div>`;
+  animateCounters('dashCards');
   checkLowStockNotif();
   const rows = DB.invoices.slice(-6).reverse();
   $('dashInvTable').innerHTML = rows.length
@@ -189,11 +230,11 @@ function openProductModal(id) {
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(p.name)}"></div>
     <div class="grid2">
       <div class="field"><label>${T.category}</label><input id="mCat" value="${esc(p.category)}"></div>
-      <div class="field"><label>${T.stock}</label><input id="mStock" type="number" value="${p.stock}"></div>
-      <div class="field"><label>${T.price}</label><input id="mPrice" type="number" value="${p.price}"></div>
-      <div class="field"><label>${T.cost}</label><input id="mCost" type="number" value="${p.cost}"></div>
+      <div class="field"><label>${T.stock}</label><input id="mStock" type="number" min="0" value="${p.stock}"></div>
+      <div class="field"><label>${T.price}</label><input id="mPrice" type="number" min="0" value="${p.price}"></div>
+      <div class="field"><label>${T.cost}</label><input id="mCost" type="number" min="0" value="${p.cost}"></div>
     </div>
-    <div class="field"><label>${T.threshold}</label><input id="mThreshold" type="number" value="${p.threshold ?? 3}"></div>
+    <div class="field"><label>${T.threshold}</label><input id="mThreshold" type="number" min="0" value="${p.threshold ?? 3}"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveProduct('${id || ''}')">${T.save}</button>
@@ -331,12 +372,12 @@ function openInvoiceModal() {
     <button class="btn btn-ghost btn-sm" onclick="addInvLine()">+ ${T.addLine}</button>
     <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="invSubtotal">0</span> ${cur()}</p>
     <div class="grid2">
-      <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" value="0" oninput="drawInvLines()"></div>
-      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" value="0" oninput="drawInvLines()"></div>
+      <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" min="0" value="0" oninput="drawInvLines()"></div>
+      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" min="0" max="100" value="0" oninput="drawInvLines()"></div>
     </div>
     <h3>${T.grandTotal}: <span id="invTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
-      <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" value="0"></div>
+      <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" min="0" value="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPaid').value=invGrandTotal()">${T.payFull}</button></div>
     </div>
     <div class="modal-actions">
@@ -477,7 +518,7 @@ function openPurchaseModal() {
     <button class="btn btn-ghost btn-sm" onclick="addPurLine()">+ ${T.addLine}</button>
     <h3 style="margin-top:16px">${T.grandTotal}: <span id="purTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
-      <div class="field"><label>${T.paidAmount}</label><input id="mPurPaid" type="number" value="0"></div>
+      <div class="field"><label>${T.paidAmount}</label><input id="mPurPaid" type="number" min="0" value="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPurPaid').value=purTotal()">${T.payFull}</button></div>
     </div>
     <div class="modal-actions">
@@ -538,7 +579,7 @@ function openCollectModal(kind, id) {
   const remaining = Math.max(0, rec.total - (rec.paidAmount || 0));
   openModal(`<h3>${T.collectPayment}</h3>
     <p class="muted">${T.remaining}: <b style="color:var(--gold-light)">${fmt(remaining)} ${cur()}</b></p>
-    <div class="field" style="margin-top:12px"><label>${T.amount}</label><input id="mCollect" type="number" value="${remaining}"></div>
+    <div class="field" style="margin-top:12px"><label>${T.amount}</label><input id="mCollect" type="number" min="0" value="${remaining}"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="doCollect('${kind}','${id}')">${T.save}</button>
@@ -595,7 +636,7 @@ function openEmployeeModal(id) {
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(e.name)}"></div>
     <div class="grid2">
       <div class="field"><label>${T.role}</label><input id="mRole" value="${esc(e.role)}"></div>
-      <div class="field"><label>${T.salary}</label><input id="mSalary" type="number" value="${e.salary}"></div>
+      <div class="field"><label>${T.salary}</label><input id="mSalary" type="number" min="0" value="${e.salary}"></div>
     </div>
     <div class="field"><label>${T.phone}</label><input id="mPhone" value="${esc(e.phone)}"></div>
     <div class="modal-actions">
@@ -662,8 +703,8 @@ function openShareholderModal(id) {
   openModal(`<h3>${id ? T.editShareholder : T.addShareholder}</h3>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(sh.name)}"></div>
     <div class="grid2">
-      <div class="field"><label>${T.percent}</label><input id="mPercent" type="number" step="0.01" value="${sh.percent}"></div>
-      <div class="field"><label>${T.capital}</label><input id="mCapital" type="number" value="${sh.capital}"></div>
+      <div class="field"><label>${T.percent}</label><input id="mPercent" type="number" min="0" max="100" step="0.01" value="${sh.percent}"></div>
+      <div class="field"><label>${T.capital}</label><input id="mCapital" type="number" min="0" value="${sh.capital}"></div>
     </div>
     <div class="field"><label>${T.note}</label><input id="mNote" value="${esc(sh.note || '')}"></div>
     <p class="muted">${T.percentLeft}: ${fmt(Math.max(0, 100 - otherTotal))}%</p>
@@ -694,7 +735,7 @@ function openWithdrawalModal(shareholderId) {
   const sh = DB.shareholders.find(x => x.id === shareholderId);
   if (!sh) return;
   openModal(`<h3>${T.addWithdrawal} — ${esc(sh.name)}</h3>
-    <div class="field"><label>${T.amount}</label><input id="mWAmount" type="number"></div>
+    <div class="field"><label>${T.amount}</label><input id="mWAmount" type="number" min="0"></div>
     <div class="field"><label>${T.note}</label><input id="mWNote"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
@@ -783,7 +824,7 @@ function openWalletTxModal(walletId) {
     <div class="field" id="toWalletField" style="display:none"><label>${T.toWallet}</label>
       <select id="mToWallet">${DB.wallets.filter(w => w.id !== walletId).map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select>
     </div>
-    <div class="field"><label>${T.amount}</label><input id="mTxAmount" type="number"></div>
+    <div class="field"><label>${T.amount}</label><input id="mTxAmount" type="number" min="0"></div>
     <div class="field"><label>${T.note}</label><input id="mTxNote"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
@@ -795,6 +836,10 @@ async function saveWalletTx(walletId) {
   const amount = Number($('mTxAmount').value || 0);
   if (!amount) return;
   const type = $('mTxType').value;
+  if (type !== 'deposit') {
+    const projected = walletBalance(walletId) - amount;
+    if (projected < 0 && !confirm(`${T.overdraftWarn}: ${fmt(projected)} ${cur()}`)) return;
+  }
   const tx = { id: uid('wt'), walletId, type, amount, note: $('mTxNote').value.trim(), date: new Date().toISOString() };
   if (type === 'transfer') tx.toWalletId = $('mToWallet').value;
   DB.walletTx.push(tx);
@@ -820,7 +865,7 @@ function renderExpenses() {
 function openExpenseModal() {
   openModal(`<h3>${T.addExpense}</h3>
     <div class="field"><label>${T.description}</label><input id="mDesc"></div>
-    <div class="field"><label>${T.amount}</label><input id="mAmount" type="number"></div>
+    <div class="field"><label>${T.amount}</label><input id="mAmount" type="number" min="0"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveExpense()">${T.save}</button>
@@ -844,11 +889,12 @@ async function delExpense(id) {
 function renderReports() {
   const f = financials();
   $('repCards').innerHTML = `
-    <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value">${fmt(f.totalSales)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.cogs}</div><div class="c-value">${fmt(f.totalCogs)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.grossProfit}</div><div class="c-value">${fmt(f.grossProfit)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.expenses}</div><div class="c-value">${fmt(f.totalExpenses)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value">${fmt(f.netProfit)}</div><div class="c-sub">${cur()}</div></div>`;
+    <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.cogs}</div><div class="c-value" data-val="${f.totalCogs}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.grossProfit}</div><div class="c-value" data-val="${f.grossProfit}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card"><div class="c-label">${T.expenses}</div><div class="c-value" data-val="${f.totalExpenses}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>`;
+  animateCounters('repCards');
 
   const months = [];
   for (let k = 5; k >= 0; k--) {
@@ -882,21 +928,42 @@ function addMsg(text, who) {
   return div;
 }
 
+let streamDiv = null;
+let chatPending = false;
+bridge.onAiChunk(delta => {
+  if (!streamDiv) return;
+  if (streamDiv.classList.contains('thinking')) { streamDiv.classList.remove('thinking'); streamDiv.textContent = ''; }
+  streamDiv.textContent += delta;
+  $('chatLog').scrollTop = $('chatLog').scrollHeight;
+});
+bridge.onAiReset(() => {
+  // فشل المزود الأول بعد أن بدأ ببث نص جزئي؛ نمسحه قبل أن يبدأ المزود الاحتياطي حتى لا يختلط الردّان
+  if (streamDiv) { streamDiv.classList.add('thinking'); streamDiv.textContent = T.aiThinking; }
+});
+
 async function sendChat() {
+  if (chatPending) return; // يمنع تضارب الردود عند إرسال أكثر من رسالة قبل اكتمال السابقة
   const inp = $('chatInput');
   const text = inp.value.trim();
   if (!text) return;
+  chatPending = true;
+  inp.disabled = true;
   inp.value = '';
   addMsg(text, 'user');
-  const think = addMsg(T.aiThinking, 'bot thinking');
+  streamDiv = addMsg(T.aiThinking, 'bot thinking');
   const res = await bridge.askAI(text, chatHistory.slice(-8));
-  think.remove();
   if (res.ok) {
-    addMsg(res.text, 'bot');
+    streamDiv.classList.remove('thinking');
+    streamDiv.textContent = res.text;
     chatHistory.push({ role: 'user', content: text }, { role: 'assistant', content: res.text });
   } else {
-    addMsg('⚠️ ' + T.aiOffline, 'bot');
+    streamDiv.classList.remove('thinking');
+    streamDiv.textContent = '⚠️ ' + T.aiOffline;
   }
+  streamDiv = null;
+  chatPending = false;
+  inp.disabled = false;
+  inp.focus();
 }
 
 async function checkAI() {

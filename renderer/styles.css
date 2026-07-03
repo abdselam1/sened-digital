@@ -212,8 +212,15 @@ body {
   background: linear-gradient(90deg, transparent, var(--gold), transparent);
   opacity: 0; transition: opacity .4s;
 }
+.card::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 40%, rgba(232,200,122,0.16) 50%, transparent 60%);
+  transform: translateX(-120%); pointer-events: none;
+}
 .card:hover { transform: translateY(-5px); border-color: var(--border-gold); box-shadow: var(--shadow-gold), var(--shadow-card); }
 .card:hover::before { opacity: 1; }
+.card:hover::after { animation: cardShimmer 1.1s ease; }
+@keyframes cardShimmer { from { transform: translateX(-120%); } to { transform: translateX(120%); } }
 .card .c-label { font-size: .78rem; color: var(--text-muted); font-weight: 700; }
 .card .c-value { font-size: 1.85rem; font-weight: 900; color: var(--gold-light); line-height: 1.3; }
 .card .c-sub { font-size: .72rem; color: var(--text-muted); }
@@ -237,7 +244,15 @@ body {
   border: none; cursor: pointer;
   font-family: inherit; font-weight: 800; font-size: .9rem;
   transition: all .3s var(--tr-bounce);
+  position: relative; overflow: hidden;
 }
+.btn-ripple {
+  position: absolute; border-radius: 50%;
+  background: rgba(255,255,255,0.5);
+  transform: scale(0); pointer-events: none;
+  animation: rippleOut .55s ease-out forwards;
+}
+@keyframes rippleOut { to { transform: scale(2.6); opacity: 0; } }
 .btn-gold { background: linear-gradient(120deg, var(--gold-light), var(--gold), var(--gold-dark)); color: #000; box-shadow: 0 8px 25px var(--gold-glow); }
 .btn-gold:hover { transform: translateY(-2px) scale(1.02); box-shadow: 0 12px 35px var(--gold-glow); }
 .btn-ghost { background: transparent; color: var(--gold); border: 1px solid var(--border-gold); }
@@ -248,7 +263,15 @@ body {
 
 /* ====== الجداول ====== */
 .tbl-wrap { overflow-x: auto; border-radius: 14px; border: 1px solid var(--border-subtle); }
-table { width: 100%; border-collapse: collapse; background: var(--dark-card); }
+table { width: 100%; border-collapse: collapse; background: var(--dark-card); animation: tableIn .4s var(--tr-smooth); }
+@keyframes tableIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+tbody tr { animation: rowIn .35s var(--tr-smooth) backwards; }
+tbody tr:nth-child(n+9) { animation-duration: 0s; }
+tbody tr:nth-child(1) { animation-delay: .02s; } tbody tr:nth-child(2) { animation-delay: .05s; }
+tbody tr:nth-child(3) { animation-delay: .08s; } tbody tr:nth-child(4) { animation-delay: .11s; }
+tbody tr:nth-child(5) { animation-delay: .14s; } tbody tr:nth-child(6) { animation-delay: .17s; }
+tbody tr:nth-child(7) { animation-delay: .20s; } tbody tr:nth-child(8) { animation-delay: .23s; }
+@keyframes rowIn { from { opacity: 0; transform: translateX(6px); } to { opacity: 1; transform: none; } }
 th {
   background: linear-gradient(120deg, var(--dark-tertiary), var(--dark-secondary));
   color: var(--gold); font-size: .8rem; font-weight: 800;
