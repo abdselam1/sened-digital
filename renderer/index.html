@@ -64,6 +64,7 @@
         <div class="nav-item" data-page="debts"><span class="ic">⧖</span><span data-i18n="debts"></span></div>
         <div class="nav-item" data-page="employees"><span class="ic">◈</span><span data-i18n="employees"></span></div>
         <div class="nav-item" data-page="shareholders"><span class="ic">◇</span><span data-i18n="shareholders"></span></div>
+        <div class="nav-item" data-page="wallets"><span class="ic">◆</span><span data-i18n="wallets"></span></div>
         <div class="nav-item" data-page="expenses"><span class="ic">▽</span><span data-i18n="expenses"></span></div>
         <div class="nav-item" data-page="reports"><span class="ic">◫</span><span data-i18n="reports"></span></div>
         <div class="nav-item" data-page="assistant"><span class="ic">✦</span><span data-i18n="assistant"></span></div>
@@ -94,7 +95,10 @@
       <section class="page" id="page-invoices">
         <div class="page-head">
           <h2 class="page-title" data-i18n="invoices"></h2>
-          <button class="btn btn-gold" onclick="openInvoiceModal()">+ <span data-i18n="newInvoice"></span></button>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost" onclick="exportInvoicesCsv()" data-i18n="exportCsv"></button>
+            <button class="btn btn-gold" onclick="openInvoiceModal()">+ <span data-i18n="newInvoice"></span></button>
+          </div>
         </div>
         <div class="tbl-wrap"><table id="invTable"></table></div>
       </section>
@@ -112,7 +116,10 @@
       <section class="page" id="page-products">
         <div class="page-head">
           <h2 class="page-title" data-i18n="products"></h2>
-          <button class="btn btn-gold" onclick="openProductModal()">+ <span data-i18n="addProduct"></span></button>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost" onclick="exportProductsCsv()" data-i18n="exportCsv"></button>
+            <button class="btn btn-gold" onclick="openProductModal()">+ <span data-i18n="addProduct"></span></button>
+          </div>
         </div>
         <div class="field"><input id="prodSearch" data-i18n-ph="search" oninput="renderProducts()"></div>
         <div class="tbl-wrap"><table id="prodTable"></table></div>
@@ -174,6 +181,19 @@
         </div>
       </section>
 
+      <!-- المحافظ والحسابات -->
+      <section class="page" id="page-wallets">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="wallets"></h2>
+          <button class="btn btn-gold" onclick="openWalletModal()">+ <span data-i18n="addWallet"></span></button>
+        </div>
+        <div class="cards" id="walletCards"></div>
+        <div class="panel">
+          <h3 data-i18n="transactions"></h3>
+          <div class="tbl-wrap"><table id="walletTxTable"></table></div>
+        </div>
+      </section>
+
       <!-- المصاريف -->
       <section class="page" id="page-expenses">
         <div class="page-head">
@@ -185,7 +205,10 @@
 
       <!-- التقارير -->
       <section class="page" id="page-reports">
-        <div class="page-head"><h2 class="page-title" data-i18n="reports"></h2></div>
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="reports"></h2>
+          <button class="btn btn-ghost" onclick="exportReportCsv()" data-i18n="exportCsv"></button>
+        </div>
         <div class="cards" id="repCards"></div>
         <div class="panel"><h3 data-i18n="monthlySales"></h3><div class="bars" id="repBars"></div></div>
         <div class="panel"><h3 data-i18n="topProducts"></h3><div class="bars" id="repTop"></div></div>
@@ -234,9 +257,40 @@
             </div>
             <div class="field"><label data-i18n="currency"></label><input id="setCurrency"></div>
             <div class="field"><label data-i18n="businessName"></label><input id="setBiz"></div>
-            <div class="field"><label data-i18n="aiModel"></label><input id="setModel"></div>
+            <div class="field"><label data-i18n="aiModel"></label>
+              <select id="setModelSelect" onchange="onModelSelectChange()"></select>
+              <input id="setModel" style="margin-top:8px;display:none" data-i18n-ph="customModel">
+            </div>
           </div>
           <div class="field"><label data-i18n="anthropicKey"></label><input id="setKey" type="password" placeholder="sk-ant-..."></div>
+          <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="companyInfo"></h3>
+          <div class="grid2">
+            <div class="field"><label data-i18n="address"></label><input id="setAddress"></div>
+            <div class="field"><label data-i18n="phone"></label><input id="setPhone"></div>
+            <div class="field"><label data-i18n="companyRC"></label><input id="setRC"></div>
+            <div class="field"><label data-i18n="companyTaxId"></label><input id="setTaxId"></div>
+          </div>
+          <div class="field"><label data-i18n="note"></label><input id="setCompanyNotes"></div>
+          <div class="field">
+            <label data-i18n="companyLogo"></label>
+            <div style="display:flex;align-items:center;gap:12px">
+              <img id="logoPreview" style="width:52px;height:52px;border-radius:12px;object-fit:cover;border:1px solid var(--border-subtle);display:none">
+              <button type="button" class="btn btn-ghost btn-sm" onclick="$('logoFile').click()" data-i18n="uploadLogo"></button>
+              <button type="button" class="btn btn-danger btn-sm" onclick="removeCompanyLogo()" data-i18n="removeLogo"></button>
+              <input type="file" id="logoFile" accept="image/*" style="display:none" onchange="onLogoFileChange(event)">
+            </div>
+          </div>
+          <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="notifSettings"></h3>
+          <label class="switch-row"><input type="checkbox" id="setNotifLowStock"><span data-i18n="lowStockNotif"></span></label>
+          <div style="height:10px"></div>
+          <label class="switch-row"><input type="checkbox" id="setNotifWeekly"><span data-i18n="weeklyReportNotif"></span></label>
+          <div style="height:14px"></div>
           <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
         </div>
         <div class="panel">
@@ -259,6 +313,7 @@
           </div>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
+        <p class="dev-credit" data-i18n="developerCredit"></p>
       </section>
     </main>
   </div>

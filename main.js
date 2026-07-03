@@ -15,10 +15,13 @@ const DEFAULT_DATA = {
   settings: {
     lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '',
     aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
-    auth: { enabled: false, username: 'admin', passwordHash: hashPass('admin123') }
+    auth: { enabled: false, username: 'admin', passwordHash: hashPass('admin123') },
+    company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
+    notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' }
   },
   products: [], customers: [], invoices: [], expenses: [],
   purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
+  wallets: [], walletTx: [],
   counters: { invoice: 1, purchase: 1 }
 };
 
@@ -28,7 +31,12 @@ function loadData() {
       const saved = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
       return {
         ...DEFAULT_DATA, ...saved,
-        settings: { ...DEFAULT_DATA.settings, ...saved.settings, auth: { ...DEFAULT_DATA.settings.auth, ...(saved.settings && saved.settings.auth) } },
+        settings: {
+          ...DEFAULT_DATA.settings, ...saved.settings,
+          auth: { ...DEFAULT_DATA.settings.auth, ...(saved.settings && saved.settings.auth) },
+          company: { ...DEFAULT_DATA.settings.company, ...(saved.settings && saved.settings.company) },
+          notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) }
+        },
         counters: { ...DEFAULT_DATA.counters, ...saved.counters }
       };
     }
@@ -92,6 +100,18 @@ function askClaude(key, messages) {
   });
 }
 
+function walletBalance(d, walletId) {
+  return d.walletTx.reduce((bal, t) => {
+    if (t.type === 'deposit' && t.walletId === walletId) return bal + Number(t.amount);
+    if (t.type === 'withdraw' && t.walletId === walletId) return bal - Number(t.amount);
+    if (t.type === 'transfer') {
+      if (t.walletId === walletId) return bal - Number(t.amount);
+      if (t.toWalletId === walletId) return bal + Number(t.amount);
+    }
+    return bal;
+  }, 0);
+}
+
 function computeFinancials(d) {
   const totalSales = d.invoices.reduce((s, i) => s + i.total, 0);
   const totalCogs = d.invoices.reduce((s, i) => s + i.items.reduce((ss, it) => ss + (Number(it.cost || 0) * it.qty), 0), 0);
@@ -99,7 +119,8 @@ function computeFinancials(d) {
   const netProfit = totalSales - totalCogs - totalExpenses;
   const totalPercent = d.shareholders.reduce((s, sh) => s + Number(sh.percent || 0), 0);
   const totalWithdrawals = d.withdrawals.reduce((s, w) => s + Number(w.amount || 0), 0);
-  return { totalSales, totalCogs, totalExpenses, netProfit, totalPercent, totalWithdrawals };
+  const totalWalletBalance = d.wallets.reduce((s, w) => s + walletBalance(d, w.id), 0);
+  return { totalSales, totalCogs, totalExpenses, netProfit, totalPercent, totalWithdrawals, totalWalletBalance };
 }
 
 function businessContext() {
@@ -121,6 +142,7 @@ function businessContext() {
 - منتجات قاربت على النفاد: ${low}
 - ديون العملاء غير المحصّلة: ${Math.round(custDebt)} ${d.settings.currency}
 - المساهمون ونسبهم (مجموع النسب ${f.totalPercent}%): ${shareLines}
+- المحافظ/الحسابات (الرصيد الإجمالي ${Math.round(f.totalWalletBalance)} ${d.settings.currency}): ${d.wallets.map(w => `${w.name}: ${Math.round(walletBalance(d, w.id))}`).join(' | ') || 'لا توجد محافظ بعد'}
 - أحدث 5 فواتير: ${d.invoices.slice(-5).map(i => `#${i.number} ${i.customerName || 'زبون'} = ${i.total}`).join(' | ') || 'لا يوجد'}`;
 }
 
@@ -160,7 +182,7 @@ async function tgHandle(msg) {
   const c = d.settings.currency;
   let reply = '';
   if (text === '/start') {
-    reply = `أهلاً بك في بوت "سند" 🌟\n\nالأوامر:\n/ملخص — ملخص المبيعات\n/منتجات — المخزون\n/فواتير — آخر الفواتير\n/مساهمين — توزيع الأرباح\n/ديون — ديون العملاء\nأو اسألني أي سؤال وسأجيبك بالذكاء الاصطناعي 🤖`;
+    reply = `أهلاً بك في بوت "سند" 🌟\n\nالأوامر:\n/ملخص — ملخص المبيعات\n/منتجات — المخزون\n/فواتير — آخر الفواتير\n/مساهمين — توزيع الأرباح\n/ديون — ديون العملاء\n/محافظ — أرصدة الحسابات\nأو اسألني أي سؤال وسأجيبك بالذكاء الاصطناعي 🤖`;
   } else if (text === '/ملخص' || text === '/summary') {
     const total = d.invoices.reduce((s, i) => s + i.total, 0);
     const today = new Date().toISOString().slice(0, 10);
@@ -192,6 +214,10 @@ async function tgHandle(msg) {
     });
     const lines = Object.entries(perCustomer).map(([n, v]) => `• ${n}: ${Math.round(v)} ${c}`).join('\n');
     reply = `💳 إجمالي ديون العملاء: ${Math.round(owing)} ${c}\n\n${lines || 'لا توجد ديون مستحقة'}`;
+  } else if (text === '/محافظ' || text === '/wallets') {
+    reply = d.wallets.length
+      ? '🏦 المحافظ والحسابات:\n\n' + d.wallets.map(w => `• ${w.name} (${w.type}): ${Math.round(walletBalance(d, w.id))} ${c}`).join('\n')
+      : 'لا توجد محافظ مسجلة بعد.';
   } else if (text) {
     try { reply = await askAI(text); }
     catch (e) { reply = '⚠️ الذكاء الاصطناعي غير متاح حالياً. تأكد من تشغيل أولاما على الجهاز.'; }

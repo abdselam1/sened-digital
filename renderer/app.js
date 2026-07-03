@@ -12,9 +12,15 @@ const uid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(
 // وضع المتصفح (بدون Electron) — للمعاينة فقط
 const bridge = window.sened || {
   loadData: async () => JSON.parse(localStorage.getItem('sened') || 'null') || {
-    settings: { lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '', aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark', auth: { enabled: false, username: 'admin', passwordHash: '' } },
+    settings: {
+      lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '', aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
+      auth: { enabled: false, username: 'admin', passwordHash: '' },
+      company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
+      notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' }
+    },
     products: [], customers: [], invoices: [], expenses: [],
     purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
+    wallets: [], walletTx: [],
     counters: { invoice: 1, purchase: 1 }
   },
   saveData: async d => localStorage.setItem('sened', JSON.stringify(d)),
@@ -115,7 +121,20 @@ function financials() {
   const custDebt = DB.invoices.reduce((s, i) => s + Math.max(0, i.total - (i.paidAmount || 0)), 0);
   const supDebt = DB.purchases.reduce((s, p) => s + Math.max(0, p.total - (p.paidAmount || 0)), 0);
   const totalPercent = DB.shareholders.reduce((s, sh) => s + Number(sh.percent || 0), 0);
-  return { totalSales, totalCogs, totalExpenses, grossProfit, netProfit, custDebt, supDebt, totalPercent };
+  const totalWalletBalance = DB.wallets.reduce((s, w) => s + walletBalance(w.id), 0);
+  return { totalSales, totalCogs, totalExpenses, grossProfit, netProfit, custDebt, supDebt, totalPercent, totalWalletBalance };
+}
+
+function walletBalance(walletId) {
+  return DB.walletTx.reduce((bal, t) => {
+    if (t.type === 'deposit' && t.walletId === walletId) return bal + Number(t.amount);
+    if (t.type === 'withdraw' && t.walletId === walletId) return bal - Number(t.amount);
+    if (t.type === 'transfer') {
+      if (t.walletId === walletId) return bal - Number(t.amount);
+      if (t.toWalletId === walletId) return bal + Number(t.amount);
+    }
+    return bal;
+  }, 0);
 }
 
 function statusOf(total, paid) {
@@ -127,20 +146,22 @@ function statusBadge(st) {
   const cls = st === 'paid' ? '' : st === 'partial' ? 'warn' : 'low';
   return `<span class="badge ${cls}">${T[st]}</span>`;
 }
+function isLow(p) { return Number(p.stock) <= Number(p.threshold ?? 3); }
 
 // ---------- لوحة التحكم ----------
 function renderDashboard() {
   const today = new Date().toISOString().slice(0, 10);
   const todaySales = DB.invoices.filter(i => i.date.slice(0, 10) === today).reduce((s, i) => s + i.total, 0);
   const f = financials();
-  const low = DB.products.filter(p => Number(p.stock) <= 3).length;
+  const low = DB.products.filter(isLow).length;
   $('dashCards').innerHTML = `
     <div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value">${fmt(todaySales)}</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value">${fmt(f.totalSales)}</div><div class="c-sub">${cur()}</div></div>
     <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value">${fmt(f.netProfit)}</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value">${fmt(f.custDebt)}</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.productsCount}</div><div class="c-value">${DB.products.length}</div></div>
+    <div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value">${fmt(f.totalWalletBalance)}</div><div class="c-sub">${cur()}</div></div>
     <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value">${low}</div></div>`;
+  checkLowStockNotif();
   const rows = DB.invoices.slice(-6).reverse();
   $('dashInvTable').innerHTML = rows.length
     ? `<thead><tr><th>${T.invoiceNo}</th><th>${T.customer}</th><th>${T.total}</th><th>${T.status}</th><th>${T.date}</th></tr></thead><tbody>` +
@@ -156,14 +177,14 @@ function renderProducts() {
     (list.length ? list.map(p => `<tr>
       <td><b>${esc(p.name)}</b></td><td>${esc(p.category) || '—'}</td>
       <td>${fmt(p.price)} ${cur()}</td><td>${fmt(p.cost)} ${cur()}</td>
-      <td><span class="badge ${Number(p.stock) <= 3 ? 'low' : ''}">${p.stock}</span></td>
+      <td><span class="badge ${isLow(p) ? 'low' : ''}">${p.stock}</span></td>
       <td><button class="btn btn-ghost btn-sm" onclick="openProductModal('${p.id}')">${T.edit}</button>
           <button class="btn btn-danger btn-sm" onclick="delProduct('${p.id}')">${T.delete}</button></td>
     </tr>`).join('') : `<tr><td colspan="6" class="empty">${T.noData}</td></tr>`) + '</tbody>';
 }
 
 function openProductModal(id) {
-  const p = DB.products.find(x => x.id === id) || { name: '', category: '', price: '', cost: '', stock: '' };
+  const p = DB.products.find(x => x.id === id) || { name: '', category: '', price: '', cost: '', stock: '', threshold: 3 };
   openModal(`<h3>${id ? T.editProduct : T.addProduct}</h3>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(p.name)}"></div>
     <div class="grid2">
@@ -172,6 +193,7 @@ function openProductModal(id) {
       <div class="field"><label>${T.price}</label><input id="mPrice" type="number" value="${p.price}"></div>
       <div class="field"><label>${T.cost}</label><input id="mCost" type="number" value="${p.cost}"></div>
     </div>
+    <div class="field"><label>${T.threshold}</label><input id="mThreshold" type="number" value="${p.threshold ?? 3}"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveProduct('${id || ''}')">${T.save}</button>
@@ -179,7 +201,7 @@ function openProductModal(id) {
 }
 
 async function saveProduct(id) {
-  const obj = { name: $('mName').value.trim(), category: $('mCat').value.trim(), price: Number($('mPrice').value || 0), cost: Number($('mCost').value || 0), stock: Number($('mStock').value || 0) };
+  const obj = { name: $('mName').value.trim(), category: $('mCat').value.trim(), price: Number($('mPrice').value || 0), cost: Number($('mCost').value || 0), stock: Number($('mStock').value || 0), threshold: Number($('mThreshold').value || 3) };
   if (!obj.name) return;
   if (id) Object.assign(DB.products.find(x => x.id === id), obj);
   else DB.products.push({ id: uid('p'), ...obj });
@@ -307,17 +329,22 @@ function openInvoiceModal() {
     </div>
     <div id="invLines"></div>
     <button class="btn btn-ghost btn-sm" onclick="addInvLine()">+ ${T.addLine}</button>
-    <h3 style="margin-top:16px">${T.grandTotal}: <span id="invTotal">0</span> ${cur()}</h3>
+    <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="invSubtotal">0</span> ${cur()}</p>
+    <div class="grid2">
+      <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" value="0" oninput="drawInvLines()"></div>
+      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" value="0" oninput="drawInvLines()"></div>
+    </div>
+    <h3>${T.grandTotal}: <span id="invTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
       <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" value="0"></div>
-      <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPaid').value=invTotal()">${T.payFull}</button></div>
+      <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPaid').value=invGrandTotal()">${T.payFull}</button></div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveInvoice()">${T.saveInvoice}</button>
     </div>`);
   drawInvLines();
-  $('mPaid').value = invTotal();
+  $('mPaid').value = invGrandTotal();
 }
 
 function drawInvLines() {
@@ -329,14 +356,22 @@ function drawInvLines() {
       <input type="number" min="1" value="${l.qty}" onchange="invLines[${ix}].qty=Number(this.value)||1;drawInvLines()">
       <button class="btn btn-danger btn-sm" onclick="invLines.splice(${ix},1);drawInvLines()">✕</button>
     </div>`).join('');
-  $('invTotal').textContent = fmt(invTotal());
+  $('invSubtotal').textContent = fmt(invSubtotal());
+  $('invTotal').textContent = fmt(invGrandTotal());
 }
 
-function invTotal() {
+function invSubtotal() {
   return invLines.reduce((s, l) => {
     const p = DB.products.find(x => x.id === l.productId);
     return s + (p ? p.price * l.qty : 0);
   }, 0);
+}
+
+function invGrandTotal() {
+  const discount = Math.max(0, Number(($('mDiscount') || {}).value || 0));
+  const taxPct = Math.max(0, Number(($('mTax') || {}).value || 0));
+  const afterDiscount = Math.max(0, invSubtotal() - discount);
+  return afterDiscount * (1 + taxPct / 100);
 }
 
 function addInvLine() { invLines.push({ productId: DB.products[0].id, qty: 1 }); drawInvLines(); }
@@ -357,12 +392,15 @@ async function saveInvoice() {
     const p = DB.products.find(x => x.id === l.productId);
     if (p) p.stock = Math.max(0, Number(p.stock) - l.qty);
   });
-  const total = invTotal();
+  const subtotal = invSubtotal();
+  const discount = Math.max(0, Number($('mDiscount').value || 0));
+  const taxPercent = Math.max(0, Number($('mTax').value || 0));
+  const total = invGrandTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPaid').value || 0)));
   DB.invoices.push({
     id: uid('i'), number: DB.counters.invoice++,
     customerId: custId, customerName: cust ? cust.name : '',
-    items, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
+    items, subtotal, discount, taxPercent, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
   });
   await persist(); closeModal(); renderAll(); toast(T.invoiceSaved);
 }
@@ -377,16 +415,35 @@ function printInvoice(id) {
   const inv = DB.invoices.find(i => i.id === id);
   if (!inv) return;
   const remaining = Math.max(0, inv.total - (inv.paidAmount || 0));
+  const co = DB.settings.company || {};
+  const logo = co.logoDataUrl
+    ? `<img src="${co.logoDataUrl}" style="height:52px;object-fit:contain">`
+    : '';
+  const infoLines = [co.address, co.phone, co.rc ? `${T.companyRC}: ${co.rc}` : '', co.taxId ? `${T.companyTaxId}: ${co.taxId}` : ''].filter(Boolean);
+  const subtotal = inv.subtotal ?? inv.total;
+  const discount = inv.discount || 0;
+  const taxPercent = inv.taxPercent || 0;
   $('print-area').innerHTML = `
     <div class="inv-head">
-      <div class="inv-brand">${esc(DB.settings.businessName || 'سند')}</div>
+      <div>
+        ${logo}
+        <div class="inv-brand">${esc(DB.settings.businessName || 'سند')}</div>
+        ${infoLines.length ? `<div class="inv-company-info">${infoLines.map(esc).join('<br>')}</div>` : ''}
+      </div>
       <div class="inv-meta">${T.invoiceNo}: #${inv.number}<br>${T.date}: ${inv.date.slice(0, 10)}<br>${T.customer}: ${esc(inv.customerName) || T.walkIn}</div>
     </div>
     <table><thead><tr><th>${T.product}</th><th>${T.price}</th><th>${T.qty}</th><th>${T.total}</th></tr></thead>
     <tbody>${inv.items.map(it => `<tr><td>${esc(it.name)}</td><td>${fmt(it.price)}</td><td>${it.qty}</td><td>${fmt(it.total)}</td></tr>`).join('')}</tbody></table>
-    <div class="inv-total">${T.grandTotal}: ${fmt(inv.total)} ${cur()}</div>
-    ${remaining > 0 ? `<div class="inv-total" style="color:#c0504d">${T.remaining}: ${fmt(remaining)} ${cur()}</div>` : ''}
-    <div class="inv-thanks">${T.thanks} ✦ ${esc(DB.settings.businessName || 'سند')} — ${T.seller}: ${esc(DB.settings.businessName || 'سند')}</div>`;
+    <div class="inv-totals-box">
+      ${discount || taxPercent ? `<div class="inv-row"><span>${T.subtotal}</span><span>${fmt(subtotal)} ${cur()}</span></div>` : ''}
+      ${discount ? `<div class="inv-row"><span>${T.discount}</span><span>-${fmt(discount)} ${cur()}</span></div>` : ''}
+      ${taxPercent ? `<div class="inv-row"><span>${T.taxPercent}</span><span>${fmt(taxPercent)}%</span></div>` : ''}
+      <div class="inv-total">${T.grandTotal}: ${fmt(inv.total)} ${cur()}</div>
+      ${remaining > 0 ? `<div class="inv-total" style="color:#c0504d">${T.remaining}: ${fmt(remaining)} ${cur()}</div>` : ''}
+    </div>
+    ${co.notes ? `<div class="inv-company-info" style="margin-top:10px">${esc(co.notes)}</div>` : ''}
+    <div class="inv-thanks">${T.thanks} ✦ ${esc(DB.settings.businessName || 'سند')}</div>
+    <div class="inv-dev-credit">${T.developerCredit}</div>`;
   bridge.print();
 }
 
@@ -652,6 +709,104 @@ async function saveWithdrawal(shareholderId) {
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
+// ---------- المحافظ والحسابات ----------
+function renderWallets() {
+  $('walletCards').innerHTML = DB.wallets.length ? DB.wallets.map(w => {
+    const bal = walletBalance(w.id);
+    return `<div class="card"><div class="c-label">${esc(w.name)} <span class="muted">(${T[w.type] || w.type})</span></div>
+      <div class="c-value ${bal < 0 ? 'low-text' : ''}">${fmt(bal)}</div><div class="c-sub">${cur()}</div>
+      <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="openWalletTxModal('${w.id}')">+ ${T.addTransaction}</button>
+        <button class="btn btn-ghost btn-sm" onclick="openWalletModal('${w.id}')">${T.edit}</button>
+        <button class="btn btn-danger btn-sm" onclick="delWallet('${w.id}')">${T.delete}</button>
+      </div></div>`;
+  }).join('') : `<div class="empty">${T.noData}</div>`;
+
+  const rows = DB.walletTx.slice().reverse().slice(0, 50);
+  $('walletTxTable').innerHTML = `<thead><tr><th>${T.date}</th><th>${T.walletName}</th><th>${T.description}</th><th>${T.amount}</th><th>${T.actions}</th></tr></thead><tbody>` +
+    (rows.length ? rows.map(t => {
+      const w = DB.wallets.find(x => x.id === t.walletId);
+      const label = t.type === 'transfer'
+        ? `${T.transfer} → ${esc((DB.wallets.find(x => x.id === t.toWalletId) || {}).name || '')}`
+        : T[t.type];
+      const sign = t.type === 'deposit' ? '+' : '-';
+      return `<tr>
+      <td>${t.date.slice(0, 10)}</td><td>${esc(w ? w.name : '—')}</td>
+      <td>${label}${t.note ? ` — ${esc(t.note)}` : ''}</td>
+      <td><span class="badge ${t.type === 'deposit' ? '' : 'warn'}">${sign}${fmt(t.amount)} ${cur()}</span></td>
+      <td><button class="btn btn-danger btn-sm" onclick="delWalletTx('${t.id}')">${T.delete}</button></td>
+    </tr>`; }).join('') : `<tr><td colspan="5" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+}
+
+function openWalletModal(id) {
+  const w = DB.wallets.find(x => x.id === id) || { name: '', type: 'cash' };
+  openModal(`<h3>${id ? T.editWallet : T.addWallet}</h3>
+    <div class="field"><label>${T.walletName}</label><input id="mName" value="${esc(w.name)}"></div>
+    <div class="field"><label>${T.walletType}</label>
+      <select id="mType">
+        <option value="cash" ${w.type === 'cash' ? 'selected' : ''}>${T.cash}</option>
+        <option value="bank" ${w.type === 'bank' ? 'selected' : ''}>${T.bank}</option>
+        <option value="mobileMoney" ${w.type === 'mobileMoney' ? 'selected' : ''}>${T.mobileMoney}</option>
+        <option value="other" ${w.type === 'other' ? 'selected' : ''}>${T.other}</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveWallet('${id || ''}')">${T.save}</button>
+    </div>`);
+}
+
+async function saveWallet(id) {
+  const obj = { name: $('mName').value.trim(), type: $('mType').value };
+  if (!obj.name) return;
+  if (id) Object.assign(DB.wallets.find(x => x.id === id), obj);
+  else DB.wallets.push({ id: uid('wl'), ...obj });
+  await persist(); closeModal(); renderAll(); toast(T.saved);
+}
+
+async function delWallet(id) {
+  if (!confirm(T.confirmDelete)) return;
+  DB.wallets = DB.wallets.filter(w => w.id !== id);
+  DB.walletTx = DB.walletTx.filter(t => t.walletId !== id && t.toWalletId !== id);
+  await persist(); renderAll();
+}
+
+function openWalletTxModal(walletId) {
+  openModal(`<h3>${T.addTransaction}</h3>
+    <div class="field"><label>${T.walletType}</label>
+      <select id="mTxType" onchange="$('toWalletField').style.display=this.value==='transfer'?'block':'none'">
+        <option value="deposit">${T.deposit}</option>
+        <option value="withdraw">${T.withdraw}</option>
+        <option value="transfer">${T.transfer}</option>
+      </select>
+    </div>
+    <div class="field" id="toWalletField" style="display:none"><label>${T.toWallet}</label>
+      <select id="mToWallet">${DB.wallets.filter(w => w.id !== walletId).map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>${T.amount}</label><input id="mTxAmount" type="number"></div>
+    <div class="field"><label>${T.note}</label><input id="mTxNote"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveWalletTx('${walletId}')">${T.save}</button>
+    </div>`);
+}
+
+async function saveWalletTx(walletId) {
+  const amount = Number($('mTxAmount').value || 0);
+  if (!amount) return;
+  const type = $('mTxType').value;
+  const tx = { id: uid('wt'), walletId, type, amount, note: $('mTxNote').value.trim(), date: new Date().toISOString() };
+  if (type === 'transfer') tx.toWalletId = $('mToWallet').value;
+  DB.walletTx.push(tx);
+  await persist(); closeModal(); renderAll(); toast(T.saved);
+}
+
+async function delWalletTx(id) {
+  if (!confirm(T.confirmDelete)) return;
+  DB.walletTx = DB.walletTx.filter(t => t.id !== id);
+  await persist(); renderAll();
+}
+
 // ---------- المصاريف ----------
 function renderExpenses() {
   const rows = DB.expenses.slice().reverse();
@@ -748,6 +903,23 @@ async function checkAI() {
   const r = await bridge.checkAI();
   $('aiDot').className = 'dot' + (r.ok ? ' on' : '');
   $('aiStatus').textContent = r.ok ? T.aiOnline : T.aiOffline;
+  fillModelSelect(r.ok ? r.models : []);
+}
+
+function fillModelSelect(models) {
+  const sel = $('setModelSelect');
+  if (!sel) return;
+  const current = DB.settings.aiModel || 'qwen2:latest';
+  const list = models && models.length ? models : (current ? [current] : []);
+  sel.innerHTML = list.map(m => `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`).join('')
+    + `<option value="__custom__" ${!list.includes(current) ? 'selected' : ''}>${T.customModel}</option>`;
+  onModelSelectChange();
+}
+
+function onModelSelectChange() {
+  const isCustom = $('setModelSelect').value === '__custom__';
+  $('setModel').style.display = isCustom ? 'block' : 'none';
+  if (!isCustom) $('setModel').value = $('setModelSelect').value;
 }
 
 // ---------- تلجرام ----------
@@ -777,12 +949,23 @@ function fillSettings() {
   $('setCurrency').value = DB.settings.currency;
   $('setBiz').value = DB.settings.businessName;
   $('setModel').value = DB.settings.aiModel || 'qwen2:latest';
+  fillModelSelect([]);
   $('setKey').value = DB.settings.anthropicKey || '';
   $('tgToken').value = DB.settings.telegramToken || '';
   $('tgState').textContent = T.tgStopped;
   $('setAuthEnabled').checked = !!(DB.settings.auth && DB.settings.auth.enabled);
   $('setUsername').value = (DB.settings.auth && DB.settings.auth.username) || 'admin';
   $('setNewPass').value = '';
+  const co = DB.settings.company || {};
+  $('setAddress').value = co.address || '';
+  $('setPhone').value = co.phone || '';
+  $('setRC').value = co.rc || '';
+  $('setTaxId').value = co.taxId || '';
+  $('setCompanyNotes').value = co.notes || '';
+  updateLogoPreview(co.logoDataUrl || '');
+  const nf = DB.settings.notifications || {};
+  $('setNotifLowStock').checked = nf.lowStock !== false;
+  $('setNotifWeekly').checked = nf.weeklyReport !== false;
 }
 
 async function saveSettings() {
@@ -791,7 +974,38 @@ async function saveSettings() {
   DB.settings.businessName = $('setBiz').value.trim() || 'سند';
   DB.settings.aiModel = $('setModel').value.trim() || 'qwen2:latest';
   DB.settings.anthropicKey = $('setKey').value.trim();
+  DB.settings.company = {
+    address: $('setAddress').value.trim(), phone: $('setPhone').value.trim(),
+    rc: $('setRC').value.trim(), taxId: $('setTaxId').value.trim(),
+    notes: $('setCompanyNotes').value.trim(), logoDataUrl: (DB.settings.company && DB.settings.company.logoDataUrl) || ''
+  };
+  DB.settings.notifications = { ...DB.settings.notifications, lowStock: $('setNotifLowStock').checked, weeklyReport: $('setNotifWeekly').checked };
   await persist(); applyLang(); renderAll(); checkAI(); toast(T.saved);
+}
+
+function updateLogoPreview(dataUrl) {
+  const img = $('logoPreview');
+  if (dataUrl) { img.src = dataUrl; img.style.display = 'block'; }
+  else { img.style.display = 'none'; }
+}
+
+function onLogoFileChange(ev) {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    DB.settings.company = DB.settings.company || {};
+    DB.settings.company.logoDataUrl = reader.result;
+    updateLogoPreview(reader.result);
+    await persist(); toast(T.saved);
+  };
+  reader.readAsDataURL(file);
+}
+
+async function removeCompanyLogo() {
+  if (DB.settings.company) DB.settings.company.logoDataUrl = '';
+  updateLogoPreview('');
+  await persist(); toast(T.saved);
 }
 
 async function saveSecurity() {
@@ -830,6 +1044,78 @@ function importData() {
   f.click();
 }
 
+// ---------- تصدير CSV ----------
+function downloadCsv(filename, rows) {
+  const csv = rows.map(r => r.map(c => {
+    const s = String(c ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  toast(T.csvExported);
+}
+
+function exportProductsCsv() {
+  const rows = [[T.name, T.category, T.price, T.cost, T.stock, T.threshold]];
+  DB.products.forEach(p => rows.push([p.name, p.category, p.price, p.cost, p.stock, p.threshold ?? 3]));
+  downloadCsv(`sened-products-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+function exportInvoicesCsv() {
+  const rows = [[T.invoiceNo, T.customer, T.subtotal, T.discount, T.taxPercent, T.total, T.paidAmount, T.status, T.date]];
+  DB.invoices.forEach(i => rows.push([i.number, i.customerName || T.walkIn, i.subtotal ?? i.total, i.discount || 0, i.taxPercent || 0, i.total, i.paidAmount || 0, T[i.status], i.date.slice(0, 10)]));
+  downloadCsv(`sened-invoices-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+function exportReportCsv() {
+  const f = financials();
+  const rows = [
+    [T.totalSales, f.totalSales], [T.cogs, f.totalCogs], [T.grossProfit, f.grossProfit],
+    [T.expenses, f.totalExpenses], [T.netProfit, f.netProfit], [T.customerDebts, f.custDebt], [T.supplierDebts, f.supDebt],
+    [], [T.topProducts]
+  ];
+  const tally = {};
+  DB.invoices.forEach(i => i.items.forEach(it => { tally[it.name] = (tally[it.name] || 0) + it.qty; }));
+  Object.entries(tally).sort((a, b) => b[1] - a[1]).forEach(([name, q]) => rows.push([name, q]));
+  downloadCsv(`sened-report-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+// ---------- الإشعارات ----------
+let notifiedLowStockIds = new Set();
+function notify(title, body) {
+  try {
+    if (Notification.permission === 'granted') new Notification(title, { body });
+    else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') new Notification(title, { body }); });
+  } catch (e) { /* بيئة لا تدعم الإشعارات */ }
+}
+
+function checkLowStockNotif() {
+  if (!(DB.settings.notifications && DB.settings.notifications.lowStock !== false)) return;
+  const low = DB.products.filter(isLow);
+  const fresh = low.filter(p => !notifiedLowStockIds.has(p.id));
+  if (fresh.length) {
+    notify(DB.settings.businessName || T.appName, `⚠️ ${T.lowStock}: ${fresh.map(p => p.name).join('، ')}`);
+    fresh.forEach(p => notifiedLowStockIds.add(p.id));
+  }
+  const lowIds = new Set(low.map(p => p.id));
+  notifiedLowStockIds.forEach(id => { if (!lowIds.has(id)) notifiedLowStockIds.delete(id); });
+}
+
+async function checkWeeklyReportNotif() {
+  if (!(DB.settings.notifications && DB.settings.notifications.weeklyReport !== false)) return;
+  const now = new Date();
+  const weekKey = `${now.getFullYear()}-W${String(Math.ceil((((now - new Date(now.getFullYear(), 0, 1)) / 86400000) + new Date(now.getFullYear(), 0, 1).getDay() + 1) / 7)).padStart(2, '0')}`;
+  if (DB.settings.notifications.lastWeeklyNotif === weekKey) return;
+  const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
+  const weekSales = DB.invoices.filter(i => i.date >= weekAgo).reduce((s, i) => s + i.total, 0);
+  notify(DB.settings.businessName || T.appName, `📊 ${T.weeklySummary}: ${fmt(weekSales)} ${cur()}`);
+  DB.settings.notifications.lastWeeklyNotif = weekKey;
+  await persist();
+}
+
 // ---------- الجسيمات الذهبية ----------
 function initParticles() {
   const cv = $('particles-canvas'), ctx = cv.getContext('2d');
@@ -863,13 +1149,14 @@ function initParticles() {
 function renderAll() {
   renderDashboard(); renderProducts(); renderCustomers(); renderSuppliers();
   renderInvoices(); renderPurchases(); renderDebts(); renderEmployees();
-  renderShareholders(); renderExpenses(); renderReports();
+  renderShareholders(); renderWallets(); renderExpenses(); renderReports();
 }
 
 async function startApp() {
   renderAll();
   checkAI();
   setInterval(checkAI, 30000);
+  checkWeeklyReportNotif();
   addMsg(T.aiWelcome, 'bot');
   bridge.onTgStatus(s => {
     if (s.running && !s.error) { $('tgState').textContent = T.tgRunning; $('tgState').className = 'badge'; }
