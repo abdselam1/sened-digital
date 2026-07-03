@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -27,6 +27,7 @@ const DEFAULT_DATA = {
   products: [], customers: [], invoices: [], expenses: [],
   purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
   wallets: [], walletTx: [],
+  auditLog: [], trash: [],
   counters: { invoice: 1, purchase: 1 }
 };
 
@@ -322,14 +323,34 @@ ipcMain.handle('tg:start', async (e, token) => {
 });
 ipcMain.handle('tg:stop', () => { tgRunning = false; return true; });
 ipcMain.handle('app:print', () => { if (win) win.webContents.print({ silent: false, printBackground: true }); return true; });
+ipcMain.handle('app:exportPdf', async (e, suggestedName) => {
+  if (!win) return { ok: false };
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'تصدير PDF',
+      defaultPath: path.join(app.getPath('documents'), suggestedName || 'export.pdf'),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    const data = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4' });
+    fs.writeFileSync(filePath, data);
+    return { ok: true, filePath };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
 ipcMain.handle('app:openExternal', (e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
-  if (d.settings.auth.username !== username) return false;
-  const expected = d.settings.auth.salt
-    ? hashPass(password, d.settings.auth.salt)
-    : hashPass(password); // نمط قديم غير مملّح، لتوافق البيانات المحفوظة سابقاً
-  return d.settings.auth.passwordHash === expected;
+  if (d.settings.auth.username === username) {
+    const expected = d.settings.auth.salt
+      ? hashPass(password, d.settings.auth.salt)
+      : hashPass(password); // نمط قديم غير مملّح، لتوافق البيانات المحفوظة سابقاً
+    if (d.settings.auth.passwordHash === expected) return { role: 'manager', name: d.settings.auth.username };
+  }
+  const emp = (d.employees || []).find(x => x.username && x.username === username && x.passwordHash);
+  if (emp && emp.passwordHash === hashPass(password, emp.salt)) {
+    return { role: emp.accessRole || 'cashier', name: emp.name };
+  }
+  return false;
 });
 ipcMain.handle('auth:setCredentials', (e, { username, password }) => {
   const d = loadData();
@@ -340,6 +361,10 @@ ipcMain.handle('auth:setCredentials', (e, { username, password }) => {
   }
   saveData(d);
   return true;
+});
+ipcMain.handle('auth:hashPassword', (e, password) => {
+  const salt = randomSalt();
+  return { salt, hash: hashPass(password, salt) };
 });
 
 // ---------- النافذة ----------

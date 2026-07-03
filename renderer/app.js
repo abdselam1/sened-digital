@@ -5,7 +5,8 @@ let chatHistory = [];
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmt = n => Number(n || 0).toLocaleString(T === I18N.ar ? 'ar-EG' : 'fr-FR', { maximumFractionDigits: 2 });
+// نستخدم en-US دائماً لضمان أرقام غربية (0123..) في كل مكان، بلا أرقام هندية مهما كانت لغة الواجهة
+const fmt = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
 const cur = () => DB.settings.currency || 'MRU';
 const uid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -21,6 +22,7 @@ const bridge = window.sened || {
     products: [], customers: [], invoices: [], expenses: [],
     purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
     wallets: [], walletTx: [],
+    auditLog: [], trash: [],
     counters: { invoice: 1, purchase: 1 }
   },
   saveData: async d => localStorage.setItem('sened', JSON.stringify(d)),
@@ -29,11 +31,13 @@ const bridge = window.sened || {
   tgStart: async () => ({ ok: false, error: 'BROWSER' }),
   tgStop: async () => true,
   print: async () => window.print(),
+  exportPdf: async () => ({ ok: false, error: 'BROWSER' }),
   onTgStatus: () => {},
   onAiChunk: () => {},
   onAiReset: () => {},
-  authVerify: async () => true,
-  authSetCredentials: async () => true
+  authVerify: async () => ({ role: 'manager', name: 'admin' }),
+  authSetCredentials: async () => true,
+  authHashPassword: async (p) => ({ salt: 'browser', hash: p })
 };
 
 // ---------- الترجمة ----------
@@ -70,16 +74,38 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-// ---------- الدخول والقفل ----------
+// ---------- الدخول والقفل والصلاحيات ----------
+let currentRole = 'manager', currentUserName = 'admin';
+const PERMS = {
+  manager: null, // null = كل الصفحات
+  accountant: ['dashboard', 'invoices', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant'],
+  cashier: ['dashboard', 'invoices', 'products', 'customers']
+};
+
+function applyPermissions() {
+  const allowed = PERMS[currentRole];
+  document.querySelectorAll('.nav-item').forEach(item => {
+    const page = item.dataset.page;
+    item.style.display = (allowed && !allowed.includes(page)) ? 'none' : '';
+  });
+  const label = $('currentUserLabel');
+  if (label) label.textContent = `${currentUserName} — ${T['role' + currentRole.charAt(0).toUpperCase() + currentRole.slice(1)] || currentRole}`;
+  // إن كانت الصفحة الحالية غير مسموحة، ارجع للوحة التحكم
+  const activePage = document.querySelector('.page.active');
+  if (activePage && allowed && !allowed.includes(activePage.id.replace('page-', ''))) goPage('dashboard');
+}
+
 async function doLogin() {
   const u = $('loginUser').value.trim();
   const p = $('loginPass').value;
-  const ok = await bridge.authVerify(u, p);
-  if (ok) {
+  const res = await bridge.authVerify(u, p);
+  if (res) {
+    currentRole = res.role || 'manager'; currentUserName = res.name || u;
     $('loginScreen').classList.remove('open');
     $('loginError').textContent = '';
     $('appShell').classList.remove('hidden');
     await startApp();
+    applyPermissions();
   } else {
     $('loginError').textContent = T.wrongLogin;
   }
@@ -92,9 +118,20 @@ function lockApp() {
 
 async function doUnlock() {
   const p = $('lockPass').value;
-  const ok = await bridge.authVerify(DB.settings.auth.username, p);
-  if (ok) { $('lockScreen').classList.remove('open'); }
+  const res = await bridge.authVerify(currentUserName, p);
+  if (res) { $('lockScreen').classList.remove('open'); }
   else { $('lockError').textContent = T.wrongLogin; }
+}
+
+function logoutApp() {
+  currentRole = 'manager'; currentUserName = 'admin';
+  $('appShell').classList.add('hidden');
+  if (DB.settings.auth && DB.settings.auth.enabled) {
+    $('loginUser').value = ''; $('loginPass').value = ''; $('loginError').textContent = '';
+    $('loginScreen').classList.add('open');
+  } else {
+    location.reload();
+  }
 }
 
 // ---------- التنقل ----------
@@ -114,10 +151,115 @@ function closeModal() { $('modalBg').classList.remove('open'); }
 $('modalBg').addEventListener('click', e => { if (e.target === $('modalBg')) closeModal(); });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if ($('modalBg').classList.contains('open')) closeModal();
+    if ($('cmdkBg').classList.contains('open')) closeCmdk();
+    else if ($('modalBg').classList.contains('open')) closeModal();
     else if ($('lockScreen').classList.contains('open')) { /* لا يُغلق بدون كلمة مرور */ }
+    return;
+  }
+  // Ctrl+K / Ctrl+F: لوحة الأوامر والبحث الشامل
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
+    e.preventDefault(); openCmdk(); return;
+  }
+  // Ctrl+N: فاتورة جديدة سريعة
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
+    e.preventDefault();
+    if (!$('modalBg').classList.contains('open') && !$('cmdkBg').classList.contains('open')) openInvoiceModal();
+    return;
+  }
+  // Ctrl+S: حفظ النافذة المفتوحة حالياً
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+    e.preventDefault();
+    const btn = document.querySelector('#modalBox .btn-gold');
+    if (btn) btn.click();
+    return;
+  }
+  // Alt+1..9: التنقل بين صفحات الشريط الجانبي
+  if (e.altKey && /^[1-9]$/.test(e.key)) {
+    const items = document.querySelectorAll('.nav-item');
+    const idx = Number(e.key) - 1;
+    if (items[idx]) { e.preventDefault(); items[idx].click(); }
   }
 });
+
+// ---------- لوحة الأوامر والبحث الشامل (Ctrl+K) ----------
+let cmdkItems = [], cmdkActive = 0;
+function cmdkActionList() {
+  return [
+    { icon: '▤', label: T.newInvoice, action: () => { closeCmdk(); openInvoiceModal(); } },
+    { icon: '⇩', label: T.newPurchase, action: () => { closeCmdk(); goPage('purchases'); openPurchaseModal(); } },
+    { icon: '▣', label: T.addProduct, action: () => { closeCmdk(); goPage('products'); openProductModal(); } },
+    { icon: '◉', label: T.addCustomer, action: () => { closeCmdk(); goPage('customers'); openCustomerModal(); } },
+    { icon: '◎', label: T.addSupplier, action: () => { closeCmdk(); goPage('suppliers'); openSupplierModal(); } },
+    { icon: '◈', label: T.addEmployee, action: () => { closeCmdk(); goPage('employees'); openEmployeeModal(); } },
+    { icon: '◇', label: T.addShareholder, action: () => { closeCmdk(); goPage('shareholders'); openShareholderModal(); } },
+    { icon: '◆', label: T.addWallet, action: () => { closeCmdk(); goPage('wallets'); openWalletModal(); } },
+    { icon: '▽', label: T.addExpense, action: () => { closeCmdk(); goPage('expenses'); openExpenseModal(); } },
+    { icon: '✦', label: T.assistant, action: () => { closeCmdk(); goPage('assistant'); } },
+    { icon: '⚙', label: T.settings, action: () => { closeCmdk(); goPage('settings'); } },
+    { icon: '◈', label: T.dashboard, action: () => { closeCmdk(); goPage('dashboard'); } }
+  ];
+}
+
+function goPage(page) {
+  const item = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (item) item.click();
+}
+
+function openCmdk() {
+  $('cmdkBg').classList.add('open');
+  $('cmdkInput').value = '';
+  cmdkRender('');
+  setTimeout(() => $('cmdkInput').focus(), 20);
+}
+function closeCmdk() { $('cmdkBg').classList.remove('open'); }
+
+function cmdkRender(query) {
+  const q = query.trim().toLowerCase();
+  let html = '';
+  cmdkItems = [];
+
+  if (!q) {
+    html += `<div class="cmdk-group">${T.cmdkActions}</div>`;
+    cmdkActionList().forEach(a => { cmdkItems.push(a); });
+  } else {
+    const dataResults = [];
+    DB.products.forEach(p => { if (p.name.toLowerCase().includes(q)) dataResults.push({ icon: '▣', label: p.name, sub: `${T.products} · ${fmt(p.price)} ${cur()}`, action: () => { closeCmdk(); goPage('products'); $('prodSearch').value = p.name; renderProducts(); } }); });
+    DB.customers.forEach(c => { if (c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) dataResults.push({ icon: '◉', label: c.name, sub: T.customers, action: () => { closeCmdk(); goPage('customers'); $('custSearch').value = c.name; renderCustomers(); } }); });
+    DB.suppliers.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◎', label: s.name, sub: T.suppliers, action: () => { closeCmdk(); goPage('suppliers'); } }); });
+    DB.invoices.forEach(i => { if (String(i.number).includes(q) || (i.customerName || '').toLowerCase().includes(q)) dataResults.push({ icon: '▤', label: `#${i.number} — ${i.customerName || T.walkIn}`, sub: `${fmt(i.total)} ${cur()}`, action: () => { closeCmdk(); goPage('invoices'); } }); });
+    DB.employees.forEach(e => { if (e.name.toLowerCase().includes(q)) dataResults.push({ icon: '◈', label: e.name, sub: T.employees, action: () => { closeCmdk(); goPage('employees'); } }); });
+    DB.shareholders.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◇', label: s.name, sub: T.shareholders, action: () => { closeCmdk(); goPage('shareholders'); } }); });
+    DB.wallets.forEach(w => { if (w.name.toLowerCase().includes(q)) dataResults.push({ icon: '◆', label: w.name, sub: T.wallets, action: () => { closeCmdk(); goPage('wallets'); } }); });
+    const actionMatches = cmdkActionList().filter(a => a.label.toLowerCase().includes(q));
+
+    if (dataResults.length) { html += `<div class="cmdk-group">${T.cmdkResults}</div>`; dataResults.slice(0, 20).forEach(r => cmdkItems.push(r)); }
+    if (actionMatches.length) { html += `<div class="cmdk-group">${T.cmdkActions}</div>`; actionMatches.forEach(a => cmdkItems.push(a)); }
+    if (!dataResults.length && !actionMatches.length) html = `<div class="empty">${T.cmdkNoResults}</div>`;
+  }
+
+  cmdkActive = 0;
+  $('cmdkResults').innerHTML = html + cmdkItems.map((it, ix) => `
+    <div class="cmdk-item${ix === 0 ? ' active' : ''}" data-ix="${ix}">
+      <span class="cmdk-ic">${it.icon}</span><span>${esc(it.label)}</span>${it.sub ? `<span class="cmdk-sub">${esc(it.sub)}</span>` : ''}
+    </div>`).join('');
+  $('cmdkResults').querySelectorAll('.cmdk-item').forEach(el => {
+    el.addEventListener('click', () => cmdkItems[Number(el.dataset.ix)].action());
+    el.addEventListener('mouseenter', () => cmdkSetActive(Number(el.dataset.ix)));
+  });
+}
+
+function cmdkSetActive(ix) {
+  cmdkActive = ix;
+  $('cmdkResults').querySelectorAll('.cmdk-item').forEach((el, i) => el.classList.toggle('active', i === ix));
+}
+
+$('cmdkInput').addEventListener('input', () => cmdkRender($('cmdkInput').value));
+$('cmdkInput').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); cmdkSetActive(Math.min(cmdkActive + 1, cmdkItems.length - 1)); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); cmdkSetActive(Math.max(cmdkActive - 1, 0)); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (cmdkItems[cmdkActive]) cmdkItems[cmdkActive].action(); }
+});
+$('cmdkBg').addEventListener('click', e => { if (e.target === $('cmdkBg')) closeCmdk(); });
 
 // ---------- تأثير التموّج عند الضغط على الأزرار ----------
 document.addEventListener('click', e => {
@@ -175,6 +317,64 @@ function walletBalance(walletId) {
     }
     return bal;
   }, 0);
+}
+
+// ---------- سجل التدقيق وسلة المحذوفات ----------
+function logAudit(action, entityType, label) {
+  DB.auditLog = DB.auditLog || [];
+  DB.auditLog.unshift({ id: uid('al'), action, entityType, label: label || '', user: currentUserName, date: new Date().toISOString() });
+  if (DB.auditLog.length > 500) DB.auditLog.length = 500;
+}
+
+async function softDelete(arrayName, id, entityType, extra) {
+  if (!confirm(T.confirmDelete)) return false;
+  const idx = DB[arrayName].findIndex(x => x.id === id);
+  if (idx === -1) return false;
+  const [item] = DB[arrayName].splice(idx, 1);
+  const bundle = { item };
+  if (extra) Object.assign(bundle, extra(item));
+  DB.trash = DB.trash || [];
+  const label = item.name || (item.number ? '#' + item.number : '');
+  DB.trash.unshift({ id: uid('tr'), arrayName, entityType, bundle, label, deletedAt: new Date().toISOString(), deletedBy: currentUserName });
+  logAudit('delete', entityType, label);
+  await persist(); renderAll();
+  toast(T.movedToTrash);
+  return true;
+}
+
+async function restoreTrash(trashId) {
+  const idx = DB.trash.findIndex(t => t.id === trashId);
+  if (idx === -1) return;
+  const entry = DB.trash[idx];
+  DB[entry.arrayName].push(entry.bundle.item);
+  if (entry.bundle.withdrawals) DB.withdrawals.push(...entry.bundle.withdrawals);
+  if (entry.bundle.walletTx) DB.walletTx.push(...entry.bundle.walletTx);
+  DB.trash.splice(idx, 1);
+  logAudit('restore', entry.entityType || entry.arrayName, entry.label);
+  await persist(); renderAll(); renderTrash();
+  toast(T.restored);
+}
+
+async function emptyTrash() {
+  if (!DB.trash.length || !confirm(T.confirmDelete)) return;
+  DB.trash = [];
+  await persist(); renderTrash();
+}
+
+function renderAuditLog() {
+  const rows = (DB.auditLog || []).slice(0, 100);
+  const el = $('auditLogTable');
+  if (!el) return;
+  el.innerHTML = `<thead><tr><th>${T.date}</th><th>${T.currentUser}</th><th>${T.actions}</th><th>${T.name}</th></tr></thead><tbody>` +
+    (rows.length ? rows.map(a => `<tr><td>${a.date.slice(0, 19).replace('T', ' ')}</td><td>${esc(a.user)}</td><td>${esc(a.action)} — ${esc(a.entityType)}</td><td>${esc(a.label)}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">${T.auditNoData}</td></tr>`) + '</tbody>';
+}
+
+function renderTrash() {
+  const rows = DB.trash || [];
+  const el = $('trashTable');
+  if (!el) return;
+  el.innerHTML = `<thead><tr><th>${T.date}</th><th>${T.name}</th><th>${T.actions}</th></tr></thead><tbody>` +
+    (rows.length ? rows.map(t => `<tr><td>${t.deletedAt.slice(0, 19).replace('T', ' ')}</td><td>${esc(t.label)}</td><td><button class="btn btn-gold btn-sm" onclick="restoreTrash('${t.id}')">${T.restore}</button></td></tr>`).join('') : `<tr><td colspan="3" class="empty">${T.noData}</td></tr>`) + '</tbody>';
 }
 
 function statusOf(total, paid) {
@@ -246,14 +446,11 @@ async function saveProduct(id) {
   if (!obj.name) return;
   if (id) Object.assign(DB.products.find(x => x.id === id), obj);
   else DB.products.push({ id: uid('p'), ...obj });
+  logAudit(id ? 'update' : 'create', T.products, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delProduct(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.products = DB.products.filter(p => p.id !== id);
-  await persist(); renderAll();
-}
+async function delProduct(id) { await softDelete('products', id, T.products); }
 
 // ---------- العملاء ----------
 function renderCustomers() {
@@ -289,14 +486,11 @@ async function saveCustomer(id) {
   if (!obj.name) return;
   if (id) Object.assign(DB.customers.find(x => x.id === id), obj);
   else DB.customers.push({ id: uid('c'), ...obj });
+  logAudit(id ? 'update' : 'create', T.customers, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delCustomer(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.customers = DB.customers.filter(c => c.id !== id);
-  await persist(); renderAll();
-}
+async function delCustomer(id) { await softDelete('customers', id, T.customers); }
 
 // ---------- الموردون ----------
 function renderSuppliers() {
@@ -332,14 +526,11 @@ async function saveSupplier(id) {
   if (!obj.name) return;
   if (id) Object.assign(DB.suppliers.find(x => x.id === id), obj);
   else DB.suppliers.push({ id: uid('s'), ...obj });
+  logAudit(id ? 'update' : 'create', T.suppliers, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delSupplier(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.suppliers = DB.suppliers.filter(s => s.id !== id);
-  await persist(); renderAll();
-}
+async function delSupplier(id) { await softDelete('suppliers', id, T.suppliers); }
 
 // ---------- الفواتير (المبيعات) ----------
 function renderInvoices() {
@@ -355,6 +546,7 @@ function renderInvoices() {
       <td>
         ${remaining > 0 ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModal('invoice','${i.id}')">${T.collectPayment}</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="printInvoice('${i.id}')">${T.print}</button>
+        <button class="btn btn-ghost btn-sm" onclick="exportInvoicePdf('${i.id}')">${T.exportPdf}</button>
         <button class="btn btn-danger btn-sm" onclick="delInvoice('${i.id}')">${T.delete}</button>
       </td>
     </tr>`; }).join('') : `<tr><td colspan="7" class="empty">${T.noData}</td></tr>`) + '</tbody>';
@@ -372,12 +564,12 @@ function openInvoiceModal() {
     <button class="btn btn-ghost btn-sm" onclick="addInvLine()">+ ${T.addLine}</button>
     <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="invSubtotal">0</span> ${cur()}</p>
     <div class="grid2">
-      <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" min="0" value="0" oninput="drawInvLines()"></div>
-      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" min="0" max="100" value="0" oninput="drawInvLines()"></div>
+      <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" min="0" placeholder="0" oninput="drawInvLines()"></div>
+      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" min="0" max="100" placeholder="0" oninput="drawInvLines()"></div>
     </div>
     <h3>${T.grandTotal}: <span id="invTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
-      <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" min="0" value="0"></div>
+      <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" min="0" placeholder="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPaid').value=invGrandTotal()">${T.payFull}</button></div>
     </div>
     <div class="modal-actions">
@@ -438,23 +630,19 @@ async function saveInvoice() {
   const taxPercent = Math.max(0, Number($('mTax').value || 0));
   const total = invGrandTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPaid').value || 0)));
+  const invNumber = DB.counters.invoice++;
   DB.invoices.push({
-    id: uid('i'), number: DB.counters.invoice++,
+    id: uid('i'), number: invNumber,
     customerId: custId, customerName: cust ? cust.name : '',
     items, subtotal, discount, taxPercent, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
   });
+  logAudit('create', T.invoices, `#${invNumber}`);
   await persist(); closeModal(); renderAll(); toast(T.invoiceSaved);
 }
 
-async function delInvoice(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.invoices = DB.invoices.filter(i => i.id !== id);
-  await persist(); renderAll();
-}
+async function delInvoice(id) { await softDelete('invoices', id, T.invoices); }
 
-function printInvoice(id) {
-  const inv = DB.invoices.find(i => i.id === id);
-  if (!inv) return;
+function buildInvoiceHtml(inv) {
   const remaining = Math.max(0, inv.total - (inv.paidAmount || 0));
   const co = DB.settings.company || {};
   const logo = co.logoDataUrl
@@ -464,7 +652,7 @@ function printInvoice(id) {
   const subtotal = inv.subtotal ?? inv.total;
   const discount = inv.discount || 0;
   const taxPercent = inv.taxPercent || 0;
-  $('print-area').innerHTML = `
+  return `
     <div class="inv-head">
       <div>
         ${logo}
@@ -485,7 +673,22 @@ function printInvoice(id) {
     ${co.notes ? `<div class="inv-company-info" style="margin-top:10px">${esc(co.notes)}</div>` : ''}
     <div class="inv-thanks">${T.thanks} ✦ ${esc(DB.settings.businessName || 'سند')}</div>
     <div class="inv-dev-credit">${T.developerCredit}</div>`;
+}
+
+function printInvoice(id) {
+  const inv = DB.invoices.find(i => i.id === id);
+  if (!inv) return;
+  $('print-area').innerHTML = buildInvoiceHtml(inv);
   bridge.print();
+}
+
+async function exportInvoicePdf(id) {
+  const inv = DB.invoices.find(i => i.id === id);
+  if (!inv) return;
+  $('print-area').innerHTML = buildInvoiceHtml(inv);
+  const res = await bridge.exportPdf(`فاتورة-${inv.number}.pdf`);
+  if (res.ok) toast(T.pdfExported);
+  else if (!res.canceled) toast('⚠️ ' + (res.error || T.aiOffline));
 }
 
 // ---------- المشتريات ----------
@@ -518,7 +721,7 @@ function openPurchaseModal() {
     <button class="btn btn-ghost btn-sm" onclick="addPurLine()">+ ${T.addLine}</button>
     <h3 style="margin-top:16px">${T.grandTotal}: <span id="purTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
-      <div class="field"><label>${T.paidAmount}</label><input id="mPurPaid" type="number" min="0" value="0"></div>
+      <div class="field"><label>${T.paidAmount}</label><input id="mPurPaid" type="number" min="0" placeholder="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPurPaid').value=purTotal()">${T.payFull}</button></div>
     </div>
     <div class="modal-actions">
@@ -558,19 +761,17 @@ async function savePurchase() {
   });
   const total = purTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPurPaid').value || 0)));
+  const purNumber = DB.counters.purchase++;
   DB.purchases.push({
-    id: uid('pu'), number: DB.counters.purchase++,
+    id: uid('pu'), number: purNumber,
     supplierId: supId, supplierName: sup ? sup.name : '',
     items, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
   });
+  logAudit('create', T.purchases, `#${purNumber}`);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delPurchase(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.purchases = DB.purchases.filter(p => p.id !== id);
-  await persist(); renderAll();
-}
+async function delPurchase(id) { await softDelete('purchases', id, T.purchases); }
 
 // ---------- تسديد الديون (فواتير/مشتريات) ----------
 function openCollectModal(kind, id) {
@@ -631,7 +832,8 @@ function renderEmployees() {
 }
 
 function openEmployeeModal(id) {
-  const e = DB.employees.find(x => x.id === id) || { name: '', role: '', salary: '', phone: '' };
+  const e = DB.employees.find(x => x.id === id) || { name: '', role: '', salary: '', phone: '', username: '', accessRole: 'cashier' };
+  const hasLogin = !!e.username;
   openModal(`<h3>${id ? T.editEmployee : T.addEmployee}</h3>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(e.name)}"></div>
     <div class="grid2">
@@ -639,6 +841,20 @@ function openEmployeeModal(id) {
       <div class="field"><label>${T.salary}</label><input id="mSalary" type="number" min="0" value="${e.salary}"></div>
     </div>
     <div class="field"><label>${T.phone}</label><input id="mPhone" value="${esc(e.phone)}"></div>
+    <label class="switch-row" style="margin:10px 0"><input type="checkbox" id="mHasLogin" ${hasLogin ? 'checked' : ''} onchange="$('mLoginFields').style.display=this.checked?'block':'none'"><span data-i18n="enableEmployeeLogin">${T.enableEmployeeLogin}</span></label>
+    <div id="mLoginFields" style="display:${hasLogin ? 'block' : 'none'}">
+      <div class="grid2">
+        <div class="field"><label>${T.username}</label><input id="mUsername" value="${esc(e.username || '')}"></div>
+        <div class="field"><label>${T.accessRole}</label>
+          <select id="mAccessRole">
+            <option value="cashier" ${e.accessRole === 'cashier' ? 'selected' : ''}>${T.roleCashier}</option>
+            <option value="accountant" ${e.accessRole === 'accountant' ? 'selected' : ''}>${T.roleAccountant}</option>
+            <option value="manager" ${e.accessRole === 'manager' ? 'selected' : ''}>${T.roleManager}</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>${T.password}</label><input id="mEmpPass" type="password" placeholder="${hasLogin ? '••••••••' : ''}"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveEmployee('${id || ''}')">${T.save}</button>
@@ -648,16 +864,23 @@ function openEmployeeModal(id) {
 async function saveEmployee(id) {
   const obj = { name: $('mName').value.trim(), role: $('mRole').value.trim(), salary: Number($('mSalary').value || 0), phone: $('mPhone').value.trim() };
   if (!obj.name) return;
-  if (id) Object.assign(DB.employees.find(x => x.id === id), obj);
+  const existing = DB.employees.find(x => x.id === id);
+  if ($('mHasLogin').checked) {
+    obj.username = $('mUsername').value.trim();
+    obj.accessRole = $('mAccessRole').value;
+    const newPass = $('mEmpPass').value;
+    if (newPass) { const { salt, hash } = await bridge.authHashPassword(newPass); obj.salt = salt; obj.passwordHash = hash; }
+    else if (existing) { obj.salt = existing.salt; obj.passwordHash = existing.passwordHash; }
+  } else {
+    obj.username = ''; obj.accessRole = ''; obj.salt = ''; obj.passwordHash = '';
+  }
+  if (id) Object.assign(existing, obj);
   else DB.employees.push({ id: uid('e'), ...obj });
+  logAudit(id ? 'update' : 'create', T.employees, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delEmployee(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.employees = DB.employees.filter(e => e.id !== id);
-  await persist(); renderAll();
-}
+async function delEmployee(id) { await softDelete('employees', id, T.employees); }
 
 async function paySalary(id) {
   const e = DB.employees.find(x => x.id === id);
@@ -719,16 +942,18 @@ async function saveShareholder(id) {
   if (!obj.name) return;
   if (id) Object.assign(DB.shareholders.find(x => x.id === id), obj);
   else DB.shareholders.push({ id: uid('sh'), ...obj });
+  logAudit(id ? 'update' : 'create', T.shareholders, obj.name);
   await persist(); closeModal(); renderAll();
   const total = DB.shareholders.reduce((s, x) => s + Number(x.percent || 0), 0);
   toast(total > 100 ? T.percentWarn : T.saved);
 }
 
 async function delShareholder(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.shareholders = DB.shareholders.filter(s => s.id !== id);
-  DB.withdrawals = DB.withdrawals.filter(w => w.shareholderId !== id);
-  await persist(); renderAll();
+  await softDelete('shareholders', id, T.shareholders, () => {
+    const related = DB.withdrawals.filter(w => w.shareholderId === id);
+    DB.withdrawals = DB.withdrawals.filter(w => w.shareholderId !== id);
+    return { withdrawals: related };
+  });
 }
 
 function openWithdrawalModal(shareholderId) {
@@ -802,14 +1027,16 @@ async function saveWallet(id) {
   if (!obj.name) return;
   if (id) Object.assign(DB.wallets.find(x => x.id === id), obj);
   else DB.wallets.push({ id: uid('wl'), ...obj });
+  logAudit(id ? 'update' : 'create', T.wallets, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
 async function delWallet(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.wallets = DB.wallets.filter(w => w.id !== id);
-  DB.walletTx = DB.walletTx.filter(t => t.walletId !== id && t.toWalletId !== id);
-  await persist(); renderAll();
+  await softDelete('wallets', id, T.wallets, () => {
+    const related = DB.walletTx.filter(t => t.walletId === id || t.toWalletId === id);
+    DB.walletTx = DB.walletTx.filter(t => t.walletId !== id && t.toWalletId !== id);
+    return { walletTx: related };
+  });
 }
 
 function openWalletTxModal(walletId) {
@@ -846,11 +1073,7 @@ async function saveWalletTx(walletId) {
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delWalletTx(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.walletTx = DB.walletTx.filter(t => t.id !== id);
-  await persist(); renderAll();
-}
+async function delWalletTx(id) { await softDelete('walletTx', id, T.transactions); }
 
 // ---------- المصاريف ----------
 function renderExpenses() {
@@ -876,14 +1099,11 @@ async function saveExpense() {
   const desc = $('mDesc').value.trim(), amount = Number($('mAmount').value || 0);
   if (!desc || !amount) return;
   DB.expenses.push({ id: uid('ex'), desc, amount, date: new Date().toISOString() });
+  logAudit('create', T.expenses, desc);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delExpense(id) {
-  if (!confirm(T.confirmDelete)) return;
-  DB.expenses = DB.expenses.filter(e => e.id !== id);
-  await persist(); renderAll();
-}
+async function delExpense(id) { await softDelete('expenses', id, T.expenses); }
 
 // ---------- التقارير ----------
 function renderReports() {
@@ -916,6 +1136,32 @@ function renderReports() {
     <div class="bar-col"><div class="bar-val">${q}</div>
     <div class="bar" style="height:${Math.round(q / tmx * 150)}px"></div>
     <div class="bar-lbl">${esc(name)}</div></div>`).join('') : `<div class="empty">${T.noData}</div>`;
+}
+
+async function exportReportPdf() {
+  const f = financials();
+  const tally = {};
+  DB.invoices.forEach(i => i.items.forEach(it => { tally[it.name] = (tally[it.name] || 0) + it.qty; }));
+  const top = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  $('print-area').innerHTML = `
+    <div class="inv-head">
+      <div class="inv-brand">${esc(DB.settings.businessName || 'سند')} — ${T.reports}</div>
+      <div class="inv-meta">${T.date}: ${new Date().toISOString().slice(0, 10)}</div>
+    </div>
+    <table><tbody>
+      <tr><td>${T.totalSales}</td><td>${fmt(f.totalSales)} ${cur()}</td></tr>
+      <tr><td>${T.cogs}</td><td>${fmt(f.totalCogs)} ${cur()}</td></tr>
+      <tr><td>${T.grossProfit}</td><td>${fmt(f.grossProfit)} ${cur()}</td></tr>
+      <tr><td>${T.expenses}</td><td>${fmt(f.totalExpenses)} ${cur()}</td></tr>
+      <tr><td><b>${T.netProfit}</b></td><td><b>${fmt(f.netProfit)} ${cur()}</b></td></tr>
+    </tbody></table>
+    <h3 style="margin:16px 0 8px">${T.topProducts}</h3>
+    <table><thead><tr><th>${T.product}</th><th>${T.qty}</th></tr></thead>
+    <tbody>${top.length ? top.map(([name, q]) => `<tr><td>${esc(name)}</td><td>${q}</td></tr>`).join('') : `<tr><td colspan="2">${T.noData}</td></tr>`}</tbody></table>
+    <div class="inv-dev-credit" style="margin-top:20px">${T.developerCredit}</div>`;
+  const res = await bridge.exportPdf(`تقرير-${new Date().toISOString().slice(0, 10)}.pdf`);
+  if (res.ok) toast(T.pdfExported);
+  else if (!res.canceled) toast('⚠️ ' + (res.error || T.aiOffline));
 }
 
 // ---------- المساعد الذكي ----------
@@ -1217,6 +1463,7 @@ function renderAll() {
   renderDashboard(); renderProducts(); renderCustomers(); renderSuppliers();
   renderInvoices(); renderPurchases(); renderDebts(); renderEmployees();
   renderShareholders(); renderWallets(); renderExpenses(); renderReports();
+  renderAuditLog(); renderTrash();
 }
 
 async function startApp() {
@@ -1248,6 +1495,7 @@ async function startApp() {
   } else {
     $('appShell').classList.remove('hidden');
     await startApp();
+    applyPermissions();
   }
   setTimeout(() => $('preloader').classList.add('hidden'), 1200);
 })();

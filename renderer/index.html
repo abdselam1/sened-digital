@@ -72,8 +72,11 @@
         <div class="nav-item" data-page="settings"><span class="ic">⚙</span><span data-i18n="settings"></span></div>
       </nav>
       <div class="sidebar-foot">
+        <div class="muted" id="currentUserLabel" style="padding:2px 14px 4px"></div>
+        <button class="foot-btn" onclick="openCmdk()"><span class="ic">⌕</span><span data-i18n="cmdkResults"></span><span class="muted" style="margin-inline-start:auto">Ctrl+K</span></button>
         <button class="foot-btn" id="themeBtn" onclick="toggleTheme()"><span class="ic">☾</span><span id="themeLabel"></span></button>
         <button class="foot-btn" onclick="lockApp()"><span class="ic">🔒</span><span data-i18n="lock"></span></button>
+        <button class="foot-btn" onclick="logoutApp()"><span class="ic">⏻</span><span data-i18n="logout"></span></button>
         <div class="ai-badge"><span class="dot" id="aiDot"></span><span id="aiStatus"></span></div>
       </div>
     </aside>
@@ -208,6 +211,7 @@
         <div class="page-head">
           <h2 class="page-title" data-i18n="reports"></h2>
           <button class="btn btn-ghost" onclick="exportReportCsv()" data-i18n="exportCsv"></button>
+          <button class="btn btn-ghost" onclick="exportReportPdf()" data-i18n="exportPdf"></button>
         </div>
         <div class="cards" id="repCards"></div>
         <div class="panel"><h3 data-i18n="monthlySales"></h3><div class="bars" id="repBars"></div></div>
@@ -313,6 +317,15 @@
           </div>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
+        <div class="panel">
+          <h3 data-i18n="trash"></h3>
+          <div class="tbl-wrap"><table id="trashTable"></table></div>
+          <button class="btn btn-danger btn-sm" style="margin-top:12px" onclick="emptyTrash()" data-i18n="emptyTrash"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="auditLog"></h3>
+          <div class="tbl-wrap"><table id="auditLogTable"></table></div>
+        </div>
         <p class="dev-credit" data-i18n="developerCredit"></p>
       </section>
     </main>
@@ -320,6 +333,15 @@
 
   <!-- نافذة منبثقة عامة -->
   <div class="modal-bg" id="modalBg"><div class="modal" id="modalBox"></div></div>
+
+  <!-- لوحة الأوامر والبحث الشامل (Ctrl+K) -->
+  <div class="cmdk-bg" id="cmdkBg">
+    <div class="cmdk-box">
+      <input id="cmdkInput" class="cmdk-input" data-i18n-ph="cmdkPlaceholder" autocomplete="off">
+      <div class="cmdk-results" id="cmdkResults"></div>
+      <div class="cmdk-hint" data-i18n="cmdkHint"></div>
+    </div>
+  </div>
 
   <!-- الإشعار -->
   <div class="toast" id="toast"></div>

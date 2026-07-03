@@ -378,6 +378,41 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold); box-shado
 .empty { text-align: center; padding: 34px; color: var(--text-muted); }
 .hidden { display: none !important; }
 
+/* ====== لوحة الأوامر والبحث الشامل ====== */
+.cmdk-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px); z-index: 8000;
+  display: none; align-items: flex-start; justify-content: center;
+  padding-top: 12vh;
+}
+.cmdk-bg.open { display: flex; }
+.cmdk-box {
+  width: min(560px, 90vw); max-height: 60vh;
+  background: linear-gradient(160deg, var(--dark-secondary), var(--dark-card));
+  border: 1px solid var(--border-gold);
+  border-radius: 18px; overflow: hidden;
+  box-shadow: var(--shadow-gold), 0 30px 90px rgba(0,0,0,0.75);
+  animation: modalIn .25s var(--tr-bounce);
+  display: flex; flex-direction: column;
+}
+.cmdk-input {
+  border: none; border-radius: 0; border-bottom: 1px solid var(--border-subtle);
+  font-size: 1.05rem; padding: 18px 20px; background: transparent;
+}
+.cmdk-input:focus { box-shadow: none; }
+.cmdk-results { overflow-y: auto; flex: 1; padding: 8px; }
+.cmdk-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 10px; cursor: pointer;
+  font-size: .9rem; color: var(--text-light);
+}
+.cmdk-item .cmdk-ic { color: var(--gold); width: 20px; text-align: center; flex-shrink: 0; }
+.cmdk-item .cmdk-sub { color: var(--text-muted); font-size: .76rem; margin-inline-start: auto; }
+.cmdk-item.active { background: linear-gradient(120deg, var(--gold-light), var(--gold)); color: #000; }
+.cmdk-item.active .cmdk-ic, .cmdk-item.active .cmdk-sub { color: #000; }
+.cmdk-group { padding: 8px 14px 4px; font-size: .68rem; color: var(--text-muted); font-weight: 800; }
+.cmdk-hint { padding: 10px 18px; border-top: 1px solid var(--border-subtle); font-size: .7rem; color: var(--text-muted); }
+
 /* ====== الطباعة (فاتورة فخمة) ====== */
 #print-area { display: none; }
 @media print {
