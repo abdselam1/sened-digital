@@ -378,6 +378,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold); box-shado
 .empty { text-align: center; padding: 34px; color: var(--text-muted); }
 .hidden { display: none !important; }
 
+/* ====== شعار الترحيب للمستخدم الجديد ====== */
+.onboard-panel {
+  background: linear-gradient(120deg, rgba(200,164,92,0.14), rgba(232,200,122,0.06));
+  border: 1px solid var(--border-gold);
+  border-radius: 18px; padding: 22px; margin-bottom: 22px;
+  animation: pageIn .5s var(--tr-smooth);
+}
+.onboard-panel h3 { color: var(--gold-light); font-size: 1.15rem; margin-bottom: 6px; }
+.onboard-steps { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.onboard-steps .btn { flex: 1; min-width: 200px; justify-content: center; }
+
 /* ====== لوحة الأوامر والبحث الشامل ====== */
 .cmdk-bg {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);

@@ -18,16 +18,17 @@ const FRESH_AUTH_SALT = randomSalt();
 // ---------- التخزين ----------
 const DEFAULT_DATA = {
   settings: {
-    lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '',
+    lang: 'ar', businessName: 'سند', currency: 'MRU', telegramBots: [],
     aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
     auth: { enabled: false, username: 'admin', salt: FRESH_AUTH_SALT, passwordHash: hashPass('admin123', FRESH_AUTH_SALT) },
     company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
-    notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' }
+    notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
+    expenseBudgets: {}, onboardingDismissed: false, currencies: []
   },
   products: [], customers: [], invoices: [], expenses: [],
   purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
   wallets: [], walletTx: [],
-  auditLog: [], trash: [],
+  auditLog: [], trash: [], returns: [],
   counters: { invoice: 1, purchase: 1 }
 };
 
@@ -57,6 +58,21 @@ function loadData() {
 
 function saveData(data) {
   fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8');
+}
+
+// ---------- نسخ احتياطي تلقائي مجدول ----------
+const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups');
+const MAX_BACKUPS = 30;
+
+function takeBackup() {
+  try {
+    if (!fs.existsSync(DATA_FILE())) return;
+    if (!fs.existsSync(BACKUP_DIR())) fs.mkdirSync(BACKUP_DIR(), { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    fs.copyFileSync(DATA_FILE(), path.join(BACKUP_DIR(), `sened-backup-${stamp}.json`));
+    const files = fs.readdirSync(BACKUP_DIR()).filter(f => f.startsWith('sened-backup-')).sort();
+    while (files.length > MAX_BACKUPS) fs.unlinkSync(path.join(BACKUP_DIR(), files.shift()));
+  } catch (e) { console.error('backup error', e); }
 }
 
 // يقرأ استجابة HTTP سطراً سطراً (NDJSON أو SSE)، ويُفرِّغ آخر سطر متبقٍ عند إغلاق
@@ -200,14 +216,14 @@ async function askAI(userText, history = [], onChunk, preloadedData, onReset) {
   return await askOllama(d.settings.aiModel || 'qwen2:latest', messages, onChunk);
 }
 
-// ---------- بوت تلجرام ----------
-let tgRunning = false, tgOffset = 0, tgToken = '';
+// ---------- بوت تلجرام (خانات متعددة — نفس منطق الأوامر لكل بوت) ----------
+const tgBots = new Map(); // botId -> { token, running, offset }
 
-function tgApi(method, payload) {
+function tgApi(token, method, payload) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload || {});
     const req = https.request({
-      hostname: 'api.telegram.org', path: `/bot${tgToken}/${method}`, method: 'POST',
+      hostname: 'api.telegram.org', path: `/bot${token}/${method}`, method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 65000
     }, res => {
       let out = '';
@@ -220,7 +236,7 @@ function tgApi(method, payload) {
   });
 }
 
-async function tgHandle(msg) {
+async function tgHandle(token, msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
   const d = loadData();
@@ -267,22 +283,23 @@ async function tgHandle(msg) {
     try { reply = await askAI(text, [], null, d); }
     catch (e) { reply = '⚠️ الذكاء الاصطناعي غير متاح حالياً. تأكد من تشغيل أولاما على الجهاز.'; }
   }
-  if (reply) await tgApi('sendMessage', { chat_id: chatId, text: reply });
+  if (reply) await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
 }
 
-async function tgLoop() {
-  while (tgRunning) {
+async function tgLoop(botId) {
+  const bot = tgBots.get(botId);
+  while (bot && bot.running) {
     try {
-      const res = await tgApi('getUpdates', { offset: tgOffset, timeout: 50 });
+      const res = await tgApi(bot.token, 'getUpdates', { offset: bot.offset, timeout: 50 });
       if (res.ok && res.result) {
         for (const u of res.result) {
-          tgOffset = u.update_id + 1;
-          if (u.message) tgHandle(u.message).catch(() => {});
+          bot.offset = u.update_id + 1;
+          if (u.message) tgHandle(bot.token, u.message).catch(() => {});
         }
       }
-      if (win && !win.isDestroyed()) win.webContents.send('tg-status', { running: true });
+      if (win && !win.isDestroyed()) win.webContents.send('tg-status', { id: botId, running: true });
     } catch (e) {
-      if (win && !win.isDestroyed()) win.webContents.send('tg-status', { running: tgRunning, error: e.message });
+      if (win && !win.isDestroyed()) win.webContents.send('tg-status', { id: botId, running: bot.running, error: e.message });
       await new Promise(r => setTimeout(r, 5000));
     }
   }
@@ -312,16 +329,21 @@ ipcMain.handle('ai:check', async () => {
     req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
   });
 });
-ipcMain.handle('tg:start', async (e, token) => {
-  tgToken = token;
+ipcMain.handle('tg:start', async (e, { id, token }) => {
   try {
-    const me = await tgApi('getMe');
+    const me = await tgApi(token, 'getMe');
     if (!me.ok) return { ok: false, error: 'رمز البوت غير صحيح' };
-    if (!tgRunning) { tgRunning = true; tgLoop(); }
+    const existing = tgBots.get(id);
+    tgBots.set(id, { token, running: true, offset: existing ? existing.offset : 0 });
+    if (!existing || !existing.running) tgLoop(id);
     return { ok: true, name: me.result.username };
   } catch (err) { return { ok: false, error: err.message }; }
 });
-ipcMain.handle('tg:stop', () => { tgRunning = false; return true; });
+ipcMain.handle('tg:stop', (e, { id }) => {
+  const bot = tgBots.get(id);
+  if (bot) bot.running = false;
+  return true;
+});
 ipcMain.handle('app:print', () => { if (win) win.webContents.print({ silent: false, printBackground: true }); return true; });
 ipcMain.handle('app:exportPdf', async (e, suggestedName) => {
   if (!win) return { ok: false };
@@ -338,6 +360,7 @@ ipcMain.handle('app:exportPdf', async (e, suggestedName) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('app:openExternal', (e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
+ipcMain.handle('app:openBackupsFolder', () => { takeBackup(); shell.openPath(BACKUP_DIR()); return true; });
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
   if (d.settings.auth.username === username) {
@@ -380,5 +403,9 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { tgRunning = false; app.quit(); });
+app.whenReady().then(() => {
+  createWindow();
+  takeBackup();
+  setInterval(takeBackup, 60 * 60 * 1000); // نسخة احتياطية إضافية كل ساعة أثناء التشغيل
+});
+app.on('window-all-closed', () => { tgBots.forEach(b => { b.running = false; }); app.quit(); });

@@ -14,15 +14,16 @@ const uid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(
 const bridge = window.sened || {
   loadData: async () => JSON.parse(localStorage.getItem('sened') || 'null') || {
     settings: {
-      lang: 'ar', businessName: 'سند', currency: 'MRU', telegramToken: '', aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
+      lang: 'ar', businessName: 'سند', currency: 'MRU', telegramBots: [], aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
       auth: { enabled: false, username: 'admin', passwordHash: '' },
       company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
-      notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' }
+      notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
+      expenseBudgets: {}, onboardingDismissed: false, currencies: []
     },
     products: [], customers: [], invoices: [], expenses: [],
     purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
     wallets: [], walletTx: [],
-    auditLog: [], trash: [],
+    auditLog: [], trash: [], returns: [],
     counters: { invoice: 1, purchase: 1 }
   },
   saveData: async d => localStorage.setItem('sened', JSON.stringify(d)),
@@ -32,6 +33,7 @@ const bridge = window.sened || {
   tgStop: async () => true,
   print: async () => window.print(),
   exportPdf: async () => ({ ok: false, error: 'BROWSER' }),
+  openBackupsFolder: async () => false,
   onTgStatus: () => {},
   onAiChunk: () => {},
   onAiReset: () => {},
@@ -137,6 +139,8 @@ function logoutApp() {
 // ---------- التنقل ----------
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
+    const allowed = PERMS[currentRole];
+    if (allowed && !allowed.includes(item.dataset.page)) { toast(T.accessDenied); return; }
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     item.classList.add('active');
@@ -184,20 +188,23 @@ document.addEventListener('keydown', e => {
 // ---------- لوحة الأوامر والبحث الشامل (Ctrl+K) ----------
 let cmdkItems = [], cmdkActive = 0;
 function cmdkActionList() {
-  return [
-    { icon: '▤', label: T.newInvoice, action: () => { closeCmdk(); openInvoiceModal(); } },
-    { icon: '⇩', label: T.newPurchase, action: () => { closeCmdk(); goPage('purchases'); openPurchaseModal(); } },
-    { icon: '▣', label: T.addProduct, action: () => { closeCmdk(); goPage('products'); openProductModal(); } },
-    { icon: '◉', label: T.addCustomer, action: () => { closeCmdk(); goPage('customers'); openCustomerModal(); } },
-    { icon: '◎', label: T.addSupplier, action: () => { closeCmdk(); goPage('suppliers'); openSupplierModal(); } },
-    { icon: '◈', label: T.addEmployee, action: () => { closeCmdk(); goPage('employees'); openEmployeeModal(); } },
-    { icon: '◇', label: T.addShareholder, action: () => { closeCmdk(); goPage('shareholders'); openShareholderModal(); } },
-    { icon: '◆', label: T.addWallet, action: () => { closeCmdk(); goPage('wallets'); openWalletModal(); } },
-    { icon: '▽', label: T.addExpense, action: () => { closeCmdk(); goPage('expenses'); openExpenseModal(); } },
-    { icon: '✦', label: T.assistant, action: () => { closeCmdk(); goPage('assistant'); } },
-    { icon: '⚙', label: T.settings, action: () => { closeCmdk(); goPage('settings'); } },
-    { icon: '◈', label: T.dashboard, action: () => { closeCmdk(); goPage('dashboard'); } }
+  const all = [
+    { page: 'invoices', icon: '▤', label: T.newInvoice, action: () => { closeCmdk(); openInvoiceModal(); } },
+    { page: 'purchases', icon: '⇩', label: T.newPurchase, action: () => { closeCmdk(); goPage('purchases'); openPurchaseModal(); } },
+    { page: 'products', icon: '▣', label: T.addProduct, action: () => { closeCmdk(); goPage('products'); openProductModal(); } },
+    { page: 'customers', icon: '◉', label: T.addCustomer, action: () => { closeCmdk(); goPage('customers'); openCustomerModal(); } },
+    { page: 'suppliers', icon: '◎', label: T.addSupplier, action: () => { closeCmdk(); goPage('suppliers'); openSupplierModal(); } },
+    { page: 'employees', icon: '◈', label: T.addEmployee, action: () => { closeCmdk(); goPage('employees'); openEmployeeModal(); } },
+    { page: 'shareholders', icon: '◇', label: T.addShareholder, action: () => { closeCmdk(); goPage('shareholders'); openShareholderModal(); } },
+    { page: 'wallets', icon: '◆', label: T.addWallet, action: () => { closeCmdk(); goPage('wallets'); openWalletModal(); } },
+    { page: 'expenses', icon: '▽', label: T.addExpense, action: () => { closeCmdk(); goPage('expenses'); openExpenseModal(); } },
+    { page: 'assistant', icon: '✦', label: T.assistant, action: () => { closeCmdk(); goPage('assistant'); } },
+    { page: 'settings', icon: '⚙', label: T.settings, action: () => { closeCmdk(); goPage('settings'); } },
+    { page: null, icon: '▦', label: T.calculator, action: () => { closeCmdk(); openCalculator(); } },
+    { page: 'dashboard', icon: '◈', label: T.dashboard, action: () => { closeCmdk(); goPage('dashboard'); } }
   ];
+  const allowed = PERMS[currentRole];
+  return allowed ? all.filter(a => !a.page || allowed.includes(a.page)) : all;
 }
 
 function goPage(page) {
@@ -222,14 +229,16 @@ function cmdkRender(query) {
     html += `<div class="cmdk-group">${T.cmdkActions}</div>`;
     cmdkActionList().forEach(a => { cmdkItems.push(a); });
   } else {
+    const allowed = PERMS[currentRole];
+    const canSee = page => !allowed || allowed.includes(page);
     const dataResults = [];
-    DB.products.forEach(p => { if (p.name.toLowerCase().includes(q)) dataResults.push({ icon: '▣', label: p.name, sub: `${T.products} · ${fmt(p.price)} ${cur()}`, action: () => { closeCmdk(); goPage('products'); $('prodSearch').value = p.name; renderProducts(); } }); });
-    DB.customers.forEach(c => { if (c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) dataResults.push({ icon: '◉', label: c.name, sub: T.customers, action: () => { closeCmdk(); goPage('customers'); $('custSearch').value = c.name; renderCustomers(); } }); });
-    DB.suppliers.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◎', label: s.name, sub: T.suppliers, action: () => { closeCmdk(); goPage('suppliers'); } }); });
-    DB.invoices.forEach(i => { if (String(i.number).includes(q) || (i.customerName || '').toLowerCase().includes(q)) dataResults.push({ icon: '▤', label: `#${i.number} — ${i.customerName || T.walkIn}`, sub: `${fmt(i.total)} ${cur()}`, action: () => { closeCmdk(); goPage('invoices'); } }); });
-    DB.employees.forEach(e => { if (e.name.toLowerCase().includes(q)) dataResults.push({ icon: '◈', label: e.name, sub: T.employees, action: () => { closeCmdk(); goPage('employees'); } }); });
-    DB.shareholders.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◇', label: s.name, sub: T.shareholders, action: () => { closeCmdk(); goPage('shareholders'); } }); });
-    DB.wallets.forEach(w => { if (w.name.toLowerCase().includes(q)) dataResults.push({ icon: '◆', label: w.name, sub: T.wallets, action: () => { closeCmdk(); goPage('wallets'); } }); });
+    if (canSee('products')) DB.products.forEach(p => { if (p.name.toLowerCase().includes(q)) dataResults.push({ icon: '▣', label: p.name, sub: `${T.products} · ${fmt(p.price)} ${cur()}`, action: () => { closeCmdk(); goPage('products'); $('prodSearch').value = p.name; renderProducts(); } }); });
+    if (canSee('customers')) DB.customers.forEach(c => { if (c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) dataResults.push({ icon: '◉', label: c.name, sub: T.customers, action: () => { closeCmdk(); goPage('customers'); $('custSearch').value = c.name; renderCustomers(); } }); });
+    if (canSee('suppliers')) DB.suppliers.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◎', label: s.name, sub: T.suppliers, action: () => { closeCmdk(); goPage('suppliers'); } }); });
+    if (canSee('invoices')) DB.invoices.forEach(i => { if (String(i.number).includes(q) || (i.customerName || '').toLowerCase().includes(q)) dataResults.push({ icon: '▤', label: `#${i.number} — ${i.customerName || T.walkIn}`, sub: `${fmt(i.total)} ${cur()}`, action: () => { closeCmdk(); goPage('invoices'); } }); });
+    if (canSee('employees')) DB.employees.forEach(e => { if (e.name.toLowerCase().includes(q)) dataResults.push({ icon: '◈', label: e.name, sub: T.employees, action: () => { closeCmdk(); goPage('employees'); } }); });
+    if (canSee('shareholders')) DB.shareholders.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◇', label: s.name, sub: T.shareholders, action: () => { closeCmdk(); goPage('shareholders'); } }); });
+    if (canSee('wallets')) DB.wallets.forEach(w => { if (w.name.toLowerCase().includes(q)) dataResults.push({ icon: '◆', label: w.name, sub: T.wallets, action: () => { closeCmdk(); goPage('wallets'); } }); });
     const actionMatches = cmdkActionList().filter(a => a.label.toLowerCase().includes(q));
 
     if (dataResults.length) { html += `<div class="cmdk-group">${T.cmdkResults}</div>`; dataResults.slice(0, 20).forEach(r => cmdkItems.push(r)); }
@@ -319,6 +328,71 @@ function walletBalance(walletId) {
   }, 0);
 }
 
+// ---------- الباركود (Code 39) ----------
+const CODE39_PATTERNS = {
+  '0': '000110100', '1': '100100001', '2': '001100001', '3': '101100000', '4': '000110001',
+  '5': '100110000', '6': '001110000', '7': '000100101', '8': '100100100', '9': '001100100',
+  'A': '100001001', 'B': '001001001', 'C': '101001000', 'D': '000011001', 'E': '100011000',
+  'F': '001011000', 'G': '000001101', 'H': '100001100', 'I': '001001100', 'J': '000011100',
+  'K': '100000011', 'L': '001000011', 'M': '101000010', 'N': '000010011', 'O': '100010010',
+  'P': '001010010', 'Q': '000000111', 'R': '100000110', 'S': '001000110', 'T': '000010110',
+  'U': '110000001', 'V': '011000001', 'W': '111000000', 'X': '010010001', 'Y': '110010000',
+  'Z': '011010000', '-': '010000101', '.': '110000100', ' ': '011000100', '$': '010101000',
+  '/': '010100010', '+': '010001010', '%': '000101010', '*': '010010100'
+};
+
+function code39Svg(text, opts) {
+  const o = Object.assign({ narrow: 2, wide: 5, height: 60, quiet: 10 }, opts || {});
+  const clean = ('*' + String(text).toUpperCase().replace(/[^0-9A-Z\-. $/+%]/g, '') + '*');
+  let x = o.quiet;
+  const bars = [];
+  for (let ci = 0; ci < clean.length; ci++) {
+    const pattern = CODE39_PATTERNS[clean[ci]];
+    if (!pattern) continue;
+    for (let i = 0; i < pattern.length; i++) {
+      const isBar = i % 2 === 0;
+      const w = pattern[i] === '1' ? o.wide : o.narrow;
+      if (isBar) bars.push(`<rect x="${x}" y="0" width="${w}" height="${o.height}" fill="#000"/>`);
+      x += w;
+    }
+    x += o.narrow; // فاصل بين الأحرف
+  }
+  const totalW = x + o.quiet;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${o.height}" viewBox="0 0 ${totalW} ${o.height}">${bars.join('')}</svg>`;
+}
+
+// ---------- آلة حاسبة سريعة ----------
+function openCalculator() {
+  openModal(`<h3>${T.calculator}</h3>
+    <input id="calcDisplay" readonly style="font-size:1.8rem;text-align:end;font-family:monospace;margin-bottom:14px" value="0">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      ${['7','8','9','÷','4','5','6','×','1','2','3','−','0','.','=','+'].map(k => `<button class="btn ${'+−×÷='.includes(k) ? 'btn-gold' : 'btn-ghost'}" onclick="calcPress('${k}')">${k}</button>`).join('')}
+      <button class="btn btn-danger" style="grid-column:span 4" onclick="calcPress('C')">C</button>
+    </div>`);
+}
+let calcExpr = '';
+function calcPress(k) {
+  if (k === 'C') { calcExpr = ''; }
+  else if (k === '=') {
+    try { calcExpr = String(Function('"use strict";return (' + calcExpr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-') + ')')()); }
+    catch (e) { calcExpr = ''; }
+  } else calcExpr += k;
+  $('calcDisplay').value = calcExpr || '0';
+}
+
+function printBarcode(id) {
+  const p = DB.products.find(x => x.id === id);
+  if (!p || !p.barcode) return;
+  $('print-area').innerHTML = `
+    <div style="text-align:center;padding:30px">
+      <div style="font-weight:900;font-size:1.1rem;margin-bottom:10px">${esc(p.name)}</div>
+      ${code39Svg(p.barcode)}
+      <div style="margin-top:6px;font-family:monospace;letter-spacing:2px">${esc(p.barcode)}</div>
+      <div style="margin-top:4px">${fmt(p.price)} ${cur()}</div>
+    </div>`;
+  bridge.print();
+}
+
 // ---------- سجل التدقيق وسلة المحذوفات ----------
 function logAudit(action, entityType, label) {
   DB.auditLog = DB.auditLog || [];
@@ -389,18 +463,43 @@ function statusBadge(st) {
 function isLow(p) { return Number(p.stock) <= Number(p.threshold ?? 3); }
 
 // ---------- لوحة التحكم ----------
+function renderOnboarding() {
+  const el = $('onboardingBanner');
+  if (!el) return;
+  const isFresh = !DB.products.length && !DB.customers.length && !DB.invoices.length;
+  if (!isFresh || DB.settings.onboardingDismissed) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="onboard-panel">
+    <h3>${T.welcomeTitle}</h3>
+    <p class="muted">${T.welcomeBody}</p>
+    <div class="onboard-steps">
+      <button class="btn btn-gold" onclick="openProductModal()">${T.stepAddProduct}</button>
+      <button class="btn btn-ghost" onclick="goPage('settings')">${T.stepCompanyInfo}</button>
+      <button class="btn btn-ghost" onclick="openCustomerModal()">${T.stepAddCustomer}</button>
+    </div>
+    <button class="btn btn-sm" style="margin-top:12px;background:transparent;color:var(--text-muted)" onclick="dismissOnboarding()">${T.dismissOnboarding}</button>
+  </div>`;
+}
+
+async function dismissOnboarding() {
+  DB.settings.onboardingDismissed = true;
+  await persist(); renderOnboarding();
+}
+
 function renderDashboard() {
+  renderOnboarding();
   const today = new Date().toISOString().slice(0, 10);
   const todaySales = DB.invoices.filter(i => i.date.slice(0, 10) === today).reduce((s, i) => s + i.total, 0);
   const f = financials();
   const low = DB.products.filter(isLow).length;
+  const expiring = DB.products.filter(isExpiringSoon).length;
   $('dashCards').innerHTML = `
     <div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value" data-val="${todaySales}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value" data-val="${f.custDebt}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value" data-val="${f.totalWalletBalance}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value" data-val="${low}">0</div></div>`;
+    <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value" data-val="${low}">0</div></div>
+    ${expiring ? `<div class="card"><div class="c-label">${T.expiringSoon}</div><div class="c-value" data-val="${expiring}">0</div></div>` : ''}`;
   animateCounters('dashCards');
   checkLowStockNotif();
   const rows = DB.invoices.slice(-6).reverse();
@@ -411,38 +510,66 @@ function renderDashboard() {
 }
 
 // ---------- المنتجات ----------
+function isExpiringSoon(p) {
+  if (!p.expiryDate) return false;
+  const days = (new Date(p.expiryDate) - new Date()) / 86400000;
+  return days <= 30;
+}
+
 function renderProducts() {
   const q = ($('prodSearch').value || '').toLowerCase();
-  const list = DB.products.filter(p => !q || p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
-  $('prodTable').innerHTML = `<thead><tr><th>${T.name}</th><th>${T.category}</th><th>${T.price}</th><th>${T.cost}</th><th>${T.stock}</th><th>${T.actions}</th></tr></thead><tbody>` +
+  const list = DB.products.filter(p => !q || p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q) || (p.barcode || '').includes(q));
+  $('prodTable').innerHTML = `<thead><tr><th>${T.name}</th><th>${T.category}</th><th>${T.price}</th><th>${T.cost}</th><th>${T.stock}</th><th>${T.expiryDate}</th><th>${T.actions}</th></tr></thead><tbody>` +
     (list.length ? list.map(p => `<tr>
       <td><b>${esc(p.name)}</b></td><td>${esc(p.category) || '—'}</td>
       <td>${fmt(p.price)} ${cur()}</td><td>${fmt(p.cost)} ${cur()}</td>
       <td><span class="badge ${isLow(p) ? 'low' : ''}">${p.stock}</span></td>
+      <td>${p.expiryDate ? `<span class="badge ${isExpiringSoon(p) ? 'low' : ''}">${p.expiryDate}</span>` : '—'}</td>
       <td><button class="btn btn-ghost btn-sm" onclick="openProductModal('${p.id}')">${T.edit}</button>
+          ${p.barcode ? `<button class="btn btn-ghost btn-sm" onclick="printBarcode('${p.id}')">${T.printBarcode}</button>` : ''}
           <button class="btn btn-danger btn-sm" onclick="delProduct('${p.id}')">${T.delete}</button></td>
-    </tr>`).join('') : `<tr><td colspan="6" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+    </tr>`).join('') : `<tr><td colspan="7" class="empty">${T.noData}</td></tr>`) + '</tbody>';
 }
 
 function openProductModal(id) {
-  const p = DB.products.find(x => x.id === id) || { name: '', category: '', price: '', cost: '', stock: '', threshold: 3 };
+  const p = DB.products.find(x => x.id === id) || { name: '', category: '', price: '', cost: '', stock: '', threshold: 3, barcode: '', expiryDate: '', batchNo: '' };
   openModal(`<h3>${id ? T.editProduct : T.addProduct}</h3>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(p.name)}"></div>
     <div class="grid2">
       <div class="field"><label>${T.category}</label><input id="mCat" value="${esc(p.category)}"></div>
       <div class="field"><label>${T.stock}</label><input id="mStock" type="number" min="0" value="${p.stock}"></div>
-      <div class="field"><label>${T.price}</label><input id="mPrice" type="number" min="0" value="${p.price}"></div>
-      <div class="field"><label>${T.cost}</label><input id="mCost" type="number" min="0" value="${p.cost}"></div>
+      <div class="field"><label>${T.price}</label><input id="mPrice" type="number" min="0" value="${p.price}" oninput="updateMarginHint()"></div>
+      <div class="field"><label>${T.cost}</label><input id="mCost" type="number" min="0" value="${p.cost}" oninput="updateMarginHint()"></div>
     </div>
-    <div class="field"><label>${T.threshold}</label><input id="mThreshold" type="number" min="0" value="${p.threshold ?? 3}"></div>
+    <p class="muted" id="marginHint" style="margin:-6px 0 12px"></p>
+    <div class="grid2">
+      <div class="field"><label>${T.threshold}</label><input id="mThreshold" type="number" min="0" value="${p.threshold ?? 3}"></div>
+      <div class="field"><label>${T.barcode}</label><input id="mBarcode" value="${esc(p.barcode || '')}"></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>${T.expiryDate}</label><input id="mExpiry" type="date" value="${p.expiryDate || ''}"></div>
+      <div class="field"><label>${T.batchNo}</label><input id="mBatch" value="${esc(p.batchNo || '')}"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveProduct('${id || ''}')">${T.save}</button>
     </div>`);
+  updateMarginHint();
+}
+
+function updateMarginHint() {
+  const price = Number(($('mPrice') || {}).value || 0);
+  const cost = Number(($('mCost') || {}).value || 0);
+  const hint = $('marginHint');
+  if (!hint) return;
+  if (!price) { hint.textContent = ''; return; }
+  const profit = price - cost;
+  const margin = price > 0 ? (profit / price * 100) : 0;
+  hint.innerHTML = `${T.profitMargin}: <b style="color:${margin < 0 ? '#e08886' : 'var(--gold-light)'}">${fmt(profit)} ${cur()} (${fmt(margin)}%)</b>`;
 }
 
 async function saveProduct(id) {
-  const obj = { name: $('mName').value.trim(), category: $('mCat').value.trim(), price: Number($('mPrice').value || 0), cost: Number($('mCost').value || 0), stock: Number($('mStock').value || 0), threshold: Number($('mThreshold').value || 3) };
+  const obj = { name: $('mName').value.trim(), category: $('mCat').value.trim(), price: Number($('mPrice').value || 0), cost: Number($('mCost').value || 0), stock: Number($('mStock').value || 0), threshold: Number($('mThreshold').value || 3), barcode: $('mBarcode').value.trim(), expiryDate: $('mExpiry').value, batchNo: $('mBatch').value.trim() };
   if (!obj.name) return;
   if (id) Object.assign(DB.products.find(x => x.id === id), obj);
   else DB.products.push({ id: uid('p'), ...obj });
@@ -547,6 +674,7 @@ function renderInvoices() {
         ${remaining > 0 ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModal('invoice','${i.id}')">${T.collectPayment}</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="printInvoice('${i.id}')">${T.print}</button>
         <button class="btn btn-ghost btn-sm" onclick="exportInvoicePdf('${i.id}')">${T.exportPdf}</button>
+        <button class="btn btn-ghost btn-sm" onclick="openReturnModal('${i.id}')">${T.returnInvoice}</button>
         <button class="btn btn-danger btn-sm" onclick="delInvoice('${i.id}')">${T.delete}</button>
       </td>
     </tr>`; }).join('') : `<tr><td colspan="7" class="empty">${T.noData}</td></tr>`) + '</tbody>';
@@ -560,6 +688,7 @@ function openInvoiceModal() {
     <div class="field"><label>${T.customer}</label>
       <select id="mCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
     </div>
+    <div class="field"><input id="mBarcodeScan" placeholder="${T.scanBarcode}" onkeydown="if(event.key==='Enter'){event.preventDefault();scanBarcodeAdd(this.value);this.value='';}"></div>
     <div id="invLines"></div>
     <button class="btn btn-ghost btn-sm" onclick="addInvLine()">+ ${T.addLine}</button>
     <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="invSubtotal">0</span> ${cur()}</p>
@@ -609,6 +738,17 @@ function invGrandTotal() {
 
 function addInvLine() { invLines.push({ productId: DB.products[0].id, qty: 1 }); drawInvLines(); }
 
+function scanBarcodeAdd(code) {
+  code = code.trim();
+  if (!code) return;
+  const p = DB.products.find(x => x.barcode && x.barcode === code);
+  if (!p) { toast(T.barcodeNotFound); return; }
+  const line = invLines.find(l => l.productId === p.id);
+  if (line) line.qty += 1;
+  else invLines.push({ productId: p.id, qty: 1 });
+  drawInvLines();
+}
+
 async function saveInvoice() {
   if (!invLines.length) return;
   for (const l of invLines) {
@@ -641,6 +781,56 @@ async function saveInvoice() {
 }
 
 async function delInvoice(id) { await softDelete('invoices', id, T.invoices); }
+
+// ---------- مرتجعات المبيعات ----------
+function openReturnModal(invoiceId) {
+  const inv = DB.invoices.find(i => i.id === invoiceId);
+  if (!inv) return;
+  const returnable = inv.items.filter(it => it.qty > 0);
+  if (!returnable.length) { toast(T.nothingToReturn); return; }
+  openModal(`<h3>${T.returnInvoice} — #${inv.number}</h3>
+    <div id="returnLines">
+      ${returnable.map((it, ix) => `
+        <div class="grid3" style="margin-bottom:8px;align-items:center">
+          <span>${esc(it.name)}</span>
+          <span class="muted">${T.remainingQty}: ${it.qty}</span>
+          <input type="number" min="0" max="${it.qty}" placeholder="0" id="mReturnQty${ix}">
+        </div>`).join('')}
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="processReturn('${invoiceId}')">${T.processReturn}</button>
+    </div>`);
+}
+
+async function processReturn(invoiceId) {
+  const inv = DB.invoices.find(i => i.id === invoiceId);
+  if (!inv) return;
+  const returnable = inv.items.filter(it => it.qty > 0);
+  const returnedItems = [];
+  returnable.forEach((it, ix) => {
+    const qty = Math.min(it.qty, Math.max(0, Number(($('mReturnQty' + ix) || {}).value || 0)));
+    if (qty <= 0) return;
+    const unitPrice = it.total / (it.qty + 0); // سعر الوحدة الأصلي قبل الخصم من هذا السطر
+    const returnedTotal = unitPrice * qty;
+    it.qty -= qty; it.total -= returnedTotal;
+    returnedItems.push({ name: it.name, qty, total: returnedTotal });
+    const p = DB.products.find(x => x.name === it.name);
+    if (p) p.stock = Number(p.stock) + qty;
+  });
+  if (!returnedItems.length) { toast(T.nothingToReturn); return; }
+  inv.items = inv.items.filter(it => it.qty > 0);
+  inv.subtotal = inv.items.reduce((s, it) => s + it.total, 0);
+  const afterDiscount = Math.max(0, inv.subtotal - (inv.discount || 0));
+  inv.total = afterDiscount * (1 + (inv.taxPercent || 0) / 100);
+  inv.paidAmount = Math.min(inv.paidAmount || 0, inv.total);
+  inv.status = statusOf(inv.total, inv.paidAmount);
+  DB.returns = DB.returns || [];
+  const returnedTotalSum = returnedItems.reduce((s, r) => s + r.total, 0);
+  DB.returns.unshift({ id: uid('rt'), invoiceId, invoiceNumber: inv.number, items: returnedItems, total: returnedTotalSum, date: new Date().toISOString(), user: currentUserName });
+  logAudit('return', T.invoices, `#${inv.number} (${fmt(returnedTotalSum)} ${cur()})`);
+  await persist(); closeModal(); renderAll(); toast(T.returnDone);
+}
 
 function buildInvoiceHtml(inv) {
   const remaining = Math.max(0, inv.total - (inv.paidAmount || 0));
@@ -885,7 +1075,8 @@ async function delEmployee(id) { await softDelete('employees', id, T.employees);
 async function paySalary(id) {
   const e = DB.employees.find(x => x.id === id);
   if (!e || !confirm(`${T.paySalary}: ${e.name} — ${fmt(e.salary)} ${cur()} ?`)) return;
-  DB.expenses.push({ id: uid('ex'), desc: `${T.salaryOf} ${e.name}`, amount: e.salary, date: new Date().toISOString(), category: 'راتب', employeeId: e.id });
+  DB.expenses.push({ id: uid('ex'), desc: `${T.salaryOf} ${e.name}`, amount: e.salary, date: new Date().toISOString(), category: 'salaries', employeeId: e.id });
+  logAudit('create', T.expenses, `${T.salaryOf} ${e.name}`);
   await persist(); renderAll(); toast(T.saved);
 }
 
@@ -1076,29 +1267,79 @@ async function saveWalletTx(walletId) {
 async function delWalletTx(id) { await softDelete('walletTx', id, T.transactions); }
 
 // ---------- المصاريف ----------
+const EXPENSE_CATEGORIES = ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'];
+function catLabel(cat) { return T['cat' + (cat || 'other').charAt(0).toUpperCase() + (cat || 'other').slice(1)] || cat || T.catOther; }
+
 function renderExpenses() {
   const rows = DB.expenses.slice().reverse();
-  $('expTable').innerHTML = `<thead><tr><th>${T.description}</th><th>${T.amount}</th><th>${T.date}</th><th>${T.actions}</th></tr></thead><tbody>` +
+  $('expTable').innerHTML = `<thead><tr><th>${T.description}</th><th>${T.expenseCategory}</th><th>${T.amount}</th><th>${T.date}</th><th>${T.actions}</th></tr></thead><tbody>` +
     (rows.length ? rows.map(e => `<tr>
-      <td>${esc(e.desc)}</td><td><span class="badge warn">${fmt(e.amount)} ${cur()}</span></td><td>${e.date.slice(0, 10)}</td>
+      <td>${esc(e.desc)}</td><td><span class="badge">${catLabel(e.category)}</span></td>
+      <td><span class="badge warn">${fmt(e.amount)} ${cur()}</span>${e.originalCurrency && e.originalCurrency !== cur() ? `<div class="muted">${fmt(e.originalAmount)} ${e.originalCurrency}</div>` : ''}</td>
+      <td>${e.date.slice(0, 10)}</td>
       <td><button class="btn btn-danger btn-sm" onclick="delExpense('${e.id}')">${T.delete}</button></td>
-    </tr>`).join('') : `<tr><td colspan="4" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+    </tr>`).join('') : `<tr><td colspan="5" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+
+  const budgets = (DB.settings.expenseBudgets) || {};
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const spentByCat = {};
+  DB.expenses.filter(e => e.date.slice(0, 7) === thisMonth).forEach(e => { spentByCat[e.category || 'other'] = (spentByCat[e.category || 'other'] || 0) + Number(e.amount); });
+  const withBudget = EXPENSE_CATEGORIES.filter(c => budgets[c] > 0);
+  const el = $('budgetCards');
+  if (el) {
+    el.innerHTML = withBudget.length ? withBudget.map(c => {
+      const spent = spentByCat[c] || 0; const limit = budgets[c]; const over = spent > limit;
+      return `<div class="card"><div class="c-label">${catLabel(c)}</div><div class="c-value ${over ? 'low-text' : ''}">${fmt(spent)}</div><div class="c-sub">/ ${fmt(limit)} ${cur()}${over ? ' — ⚠️ ' + T.budgetExceeded : ''}</div></div>`;
+    }).join('') : '';
+  }
 }
 
 function openExpenseModal() {
+  const currencies = DB.settings.currencies || [];
   openModal(`<h3>${T.addExpense}</h3>
     <div class="field"><label>${T.description}</label><input id="mDesc"></div>
-    <div class="field"><label>${T.amount}</label><input id="mAmount" type="number" min="0"></div>
+    <div class="grid2">
+      <div class="field"><label>${T.originalAmount}</label><input id="mAmount" type="number" min="0" oninput="updateExpensePreview()"></div>
+      <div class="field"><label>${T.expenseCategory}</label>
+        <select id="mCategory">${EXPENSE_CATEGORIES.map(c => `<option value="${c}">${catLabel(c)}</option>`).join('')}</select>
+      </div>
+    </div>
+    ${currencies.length ? `
+    <div class="field"><label>${T.expenseCurrency}</label>
+      <select id="mExpCurrency" onchange="updateExpensePreview()">
+        <option value="${cur()}">${cur()} (${T.baseCurrency})</option>
+        ${currencies.map(c => `<option value="${c.code}">${c.code}</option>`).join('')}
+      </select>
+    </div>
+    <p class="muted" id="expPreview"></p>` : ''}
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveExpense()">${T.save}</button>
     </div>`);
 }
 
+function updateExpensePreview() {
+  const preview = $('expPreview');
+  if (!preview) return;
+  const amount = Number($('mAmount').value || 0);
+  const code = $('mExpCurrency').value;
+  if (code === cur()) { preview.textContent = ''; return; }
+  const rate = ((DB.settings.currencies || []).find(c => c.code === code) || {}).rate || 0;
+  preview.textContent = `${T.convertedTo} ${cur()}: ${fmt(amount * rate)} ${cur()}`;
+}
+
 async function saveExpense() {
-  const desc = $('mDesc').value.trim(), amount = Number($('mAmount').value || 0);
-  if (!desc || !amount) return;
-  DB.expenses.push({ id: uid('ex'), desc, amount, date: new Date().toISOString() });
+  const desc = $('mDesc').value.trim(), inputAmount = Number($('mAmount').value || 0), category = $('mCategory').value;
+  if (!desc || !inputAmount) return;
+  const curField = $('mExpCurrency');
+  const code = curField ? curField.value : cur();
+  let amount = inputAmount, originalAmount = null, originalCurrency = null;
+  if (code !== cur()) {
+    const rate = ((DB.settings.currencies || []).find(c => c.code === code) || {}).rate || 0;
+    amount = inputAmount * rate;
+    originalAmount = inputAmount; originalCurrency = code;
+  }
+  DB.expenses.push({ id: uid('ex'), desc, amount, originalAmount, originalCurrency, category, date: new Date().toISOString() });
   logAudit('create', T.expenses, desc);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
@@ -1108,12 +1349,19 @@ async function delExpense(id) { await softDelete('expenses', id, T.expenses); }
 // ---------- التقارير ----------
 function renderReports() {
   const f = financials();
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const lastMonthDate = new Date(); lastMonthDate.setMonth(lastMonthDate.getMonth() - 1);
+  const lastMonth = lastMonthDate.toISOString().slice(0, 7);
+  const thisMonthSales = DB.invoices.filter(i => i.date.slice(0, 7) === thisMonth).reduce((s, i) => s + i.total, 0);
+  const lastMonthSales = DB.invoices.filter(i => i.date.slice(0, 7) === lastMonth).reduce((s, i) => s + i.total, 0);
+  const growth = lastMonthSales > 0 ? ((thisMonthSales - lastMonthSales) / lastMonthSales * 100) : (thisMonthSales > 0 ? 100 : 0);
   $('repCards').innerHTML = `
     <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.cogs}</div><div class="c-value" data-val="${f.totalCogs}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.grossProfit}</div><div class="c-value" data-val="${f.grossProfit}">0</div><div class="c-sub">${cur()}</div></div>
     <div class="card"><div class="c-label">${T.expenses}</div><div class="c-value" data-val="${f.totalExpenses}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>`;
+    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>
+    <div class="card ${growth >= 0 ? 'emerald' : ''}"><div class="c-label">${T.growthVsLastMonth}</div><div class="c-value ${growth < 0 ? 'low-text' : ''}">${growth >= 0 ? '+' : ''}${fmt(growth)}%</div></div>`;
   animateCounters('repCards');
 
   const months = [];
@@ -1136,6 +1384,23 @@ function renderReports() {
     <div class="bar-col"><div class="bar-val">${q}</div>
     <div class="bar" style="height:${Math.round(q / tmx * 150)}px"></div>
     <div class="bar-lbl">${esc(name)}</div></div>`).join('') : `<div class="empty">${T.noData}</div>`;
+
+  // هامش الربح لكل منتج
+  const perProduct = {};
+  DB.invoices.forEach(i => i.items.forEach(it => {
+    const p = perProduct[it.name] || (perProduct[it.name] = { revenue: 0, cost: 0, qty: 0 });
+    p.revenue += it.total; p.cost += Number(it.cost || 0) * it.qty; p.qty += it.qty;
+  }));
+  const marginRows = Object.entries(perProduct).map(([name, v]) => ({ name, ...v, profit: v.revenue - v.cost, margin: v.revenue > 0 ? (v.revenue - v.cost) / v.revenue * 100 : 0 })).sort((a, b) => b.profit - a.profit).slice(0, 10);
+  $('repMargin').innerHTML = `<thead><tr><th>${T.product}</th><th>${T.qty}</th><th>${T.totalSales}</th><th>${T.netProfit}</th><th>${T.margin}</th></tr></thead><tbody>` +
+    (marginRows.length ? marginRows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.qty}</td><td>${fmt(r.revenue)} ${cur()}</td><td>${fmt(r.profit)} ${cur()}</td><td><span class="badge ${r.margin < 0 ? 'low' : ''}">${fmt(r.margin)}%</span></td></tr>`).join('') : `<tr><td colspan="5" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+
+  // أفضل العملاء إنفاقاً
+  const perCustomer = {};
+  DB.invoices.forEach(i => { const name = i.customerName || T.walkIn; perCustomer[name] = (perCustomer[name] || 0) + i.total; });
+  const topCustomers = Object.entries(perCustomer).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  $('repTopCustomers').innerHTML = `<thead><tr><th>${T.customer}</th><th>${T.totalSales}</th></tr></thead><tbody>` +
+    (topCustomers.length ? topCustomers.map(([name, total]) => `<tr><td>${esc(name)}</td><td><span class="badge">${fmt(total)} ${cur()}</span></td></tr>`).join('') : `<tr><td colspan="2" class="empty">${T.noData}</td></tr>`) + '</tbody>';
 }
 
 async function exportReportPdf() {
@@ -1235,25 +1500,73 @@ function onModelSelectChange() {
   if (!isCustom) $('setModel').value = $('setModelSelect').value;
 }
 
-// ---------- تلجرام ----------
-async function startBot() {
-  const token = $('tgToken').value.trim();
-  if (!token) return;
-  $('tgState').textContent = '...';
-  const r = await bridge.tgStart(token);
-  if (r.ok) {
-    DB.settings.telegramToken = token; await persist();
-    $('tgState').textContent = `${T.tgRunning} — @${r.name}`;
-    $('tgState').className = 'badge';
-    toast(T.tgRunning);
-  } else {
-    $('tgState').textContent = '⚠️ ' + (r.error || ''); $('tgState').className = 'badge low';
-  }
+// ---------- تلجرام (خانات متعددة) ----------
+const tgSlotStatus = {}; // botId -> {running, error, name}
+
+function renderTelegramBots() {
+  const bots = DB.settings.telegramBots || [];
+  const el = $('tgBotsList');
+  if (!el) return;
+  el.innerHTML = bots.length ? bots.map(b => {
+    const st = tgSlotStatus[b.id] || {};
+    const badgeClass = st.running ? '' : (st.error ? 'low' : 'warn');
+    const badgeText = st.running ? `${T.tgRunning}${st.name ? ' — @' + st.name : ''}` : (st.error ? '⚠️ ' + st.error : T.tgStopped);
+    return `<div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+        <div><b>${esc(b.name)}</b> <span class="badge ${badgeClass}" id="tgBadge_${b.id}">${badgeText}</span></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-gold btn-sm" onclick="startBotSlot('${b.id}')">${T.tgStart}</button>
+          <button class="btn btn-ghost btn-sm" onclick="stopBotSlot('${b.id}')">${T.tgStop}</button>
+          <button class="btn btn-ghost btn-sm" onclick="openTelegramBotModal('${b.id}')">${T.edit}</button>
+          <button class="btn btn-danger btn-sm" onclick="delTelegramBot('${b.id}')">${T.delete}</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') : `<div class="empty">${T.noData}</div>`;
 }
 
-async function stopBot() {
-  await bridge.tgStop();
-  $('tgState').textContent = T.tgStopped; $('tgState').className = 'badge warn';
+function openTelegramBotModal(id) {
+  const b = (DB.settings.telegramBots || []).find(x => x.id === id) || { name: '', token: '' };
+  openModal(`<h3>${id ? T.editBot : T.addBot}</h3>
+    <div class="field"><label>${T.botName}</label><input id="mBotName" value="${esc(b.name)}"></div>
+    <div class="field"><label>${T.tgToken}</label><input id="mBotToken" value="${esc(b.token)}" placeholder="123456789:AAF..."></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveTelegramBot('${id || ''}')">${T.save}</button>
+    </div>`);
+}
+
+async function saveTelegramBot(id) {
+  const name = $('mBotName').value.trim(), token = $('mBotToken').value.trim();
+  if (!name || !token) return;
+  DB.settings.telegramBots = DB.settings.telegramBots || [];
+  if (id) Object.assign(DB.settings.telegramBots.find(b => b.id === id), { name, token });
+  else DB.settings.telegramBots.push({ id: uid('tg'), name, token });
+  await persist(); closeModal(); renderTelegramBots(); toast(T.saved);
+}
+
+async function delTelegramBot(id) {
+  if (!confirm(T.confirmDelete)) return;
+  await bridge.tgStop(id);
+  DB.settings.telegramBots = (DB.settings.telegramBots || []).filter(b => b.id !== id);
+  delete tgSlotStatus[id];
+  await persist(); renderTelegramBots();
+}
+
+async function startBotSlot(id) {
+  const b = (DB.settings.telegramBots || []).find(x => x.id === id);
+  if (!b) return;
+  tgSlotStatus[id] = { running: false };
+  renderTelegramBots();
+  const r = await bridge.tgStart(id, b.token);
+  tgSlotStatus[id] = r.ok ? { running: true, name: r.name } : { running: false, error: r.error };
+  renderTelegramBots();
+}
+
+async function stopBotSlot(id) {
+  await bridge.tgStop(id);
+  tgSlotStatus[id] = { running: false };
+  renderTelegramBots();
 }
 
 // ---------- الإعدادات ----------
@@ -1264,8 +1577,6 @@ function fillSettings() {
   $('setModel').value = DB.settings.aiModel || 'qwen2:latest';
   fillModelSelect([]);
   $('setKey').value = DB.settings.anthropicKey || '';
-  $('tgToken').value = DB.settings.telegramToken || '';
-  $('tgState').textContent = T.tgStopped;
   $('setAuthEnabled').checked = !!(DB.settings.auth && DB.settings.auth.enabled);
   $('setUsername').value = (DB.settings.auth && DB.settings.auth.username) || 'admin';
   $('setNewPass').value = '';
@@ -1279,6 +1590,50 @@ function fillSettings() {
   const nf = DB.settings.notifications || {};
   $('setNotifLowStock').checked = nf.lowStock !== false;
   $('setNotifWeekly').checked = nf.weeklyReport !== false;
+  fillBudgetInputs();
+  renderCurrenciesList();
+}
+
+function renderCurrenciesList() {
+  const list = DB.settings.currencies || [];
+  const el = $('currenciesList');
+  if (!el) return;
+  el.innerHTML = list.length ? list.map((c, ix) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+      <span><b>${esc(c.code)}</b> = ${fmt(c.rate)} ${cur()}</span>
+      <button class="btn btn-danger btn-sm" onclick="delCurrency(${ix})">${T.delete}</button>
+    </div>`).join('') : `<p class="muted">${T.noData}</p>`;
+}
+
+async function addCurrency() {
+  const code = $('newCurCode').value.trim().toUpperCase();
+  const rate = Number($('newCurRate').value || 0);
+  if (!code || !rate) return;
+  DB.settings.currencies = DB.settings.currencies || [];
+  DB.settings.currencies.push({ code, rate });
+  $('newCurCode').value = ''; $('newCurRate').value = '';
+  await persist(); renderCurrenciesList(); toast(T.saved);
+}
+
+async function delCurrency(ix) {
+  DB.settings.currencies.splice(ix, 1);
+  await persist(); renderCurrenciesList();
+}
+
+function fillBudgetInputs() {
+  const budgets = DB.settings.expenseBudgets || {};
+  $('budgetInputs').innerHTML = EXPENSE_CATEGORIES.map(c => `
+    <div class="field"><label>${catLabel(c)}</label><input type="number" min="0" placeholder="0" id="mBudget_${c}" value="${budgets[c] || ''}"></div>
+  `).join('');
+}
+
+async function saveBudgets() {
+  DB.settings.expenseBudgets = {};
+  EXPENSE_CATEGORIES.forEach(c => {
+    const v = Number(($('mBudget_' + c) || {}).value || 0);
+    if (v > 0) DB.settings.expenseBudgets[c] = v;
+  });
+  await persist(); renderAll(); toast(T.saved);
 }
 
 async function saveSettings() {
@@ -1463,7 +1818,7 @@ function renderAll() {
   renderDashboard(); renderProducts(); renderCustomers(); renderSuppliers();
   renderInvoices(); renderPurchases(); renderDebts(); renderEmployees();
   renderShareholders(); renderWallets(); renderExpenses(); renderReports();
-  renderAuditLog(); renderTrash();
+  renderAuditLog(); renderTrash(); renderTelegramBots();
 }
 
 async function startApp() {
@@ -1473,12 +1828,11 @@ async function startApp() {
   checkWeeklyReportNotif();
   addMsg(T.aiWelcome, 'bot');
   bridge.onTgStatus(s => {
-    if (s.running && !s.error) { $('tgState').textContent = T.tgRunning; $('tgState').className = 'badge'; }
+    tgSlotStatus[s.id] = { running: s.running && !s.error, error: s.error };
+    renderTelegramBots();
   });
-  if (DB.settings.telegramToken && window.sened) {
-    bridge.tgStart(DB.settings.telegramToken).then(r => {
-      if (r.ok) { $('tgState').textContent = `${T.tgRunning} — @${r.name}`; $('tgState').className = 'badge'; }
-    });
+  if (window.sened) {
+    (DB.settings.telegramBots || []).forEach(b => startBotSlot(b.id));
   }
 }
 

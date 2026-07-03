@@ -74,6 +74,7 @@
       <div class="sidebar-foot">
         <div class="muted" id="currentUserLabel" style="padding:2px 14px 4px"></div>
         <button class="foot-btn" onclick="openCmdk()"><span class="ic">⌕</span><span data-i18n="cmdkResults"></span><span class="muted" style="margin-inline-start:auto">Ctrl+K</span></button>
+        <button class="foot-btn" onclick="openCalculator()"><span class="ic">▦</span><span data-i18n="calculator"></span></button>
         <button class="foot-btn" id="themeBtn" onclick="toggleTheme()"><span class="ic">☾</span><span id="themeLabel"></span></button>
         <button class="foot-btn" onclick="lockApp()"><span class="ic">🔒</span><span data-i18n="lock"></span></button>
         <button class="foot-btn" onclick="logoutApp()"><span class="ic">⏻</span><span data-i18n="logout"></span></button>
@@ -87,6 +88,7 @@
       <!-- لوحة التحكم -->
       <section class="page active" id="page-dashboard">
         <div class="page-head"><h2 class="page-title" data-i18n="dashboard"></h2></div>
+        <div id="onboardingBanner"></div>
         <div class="cards" id="dashCards"></div>
         <div class="panel">
           <h3 data-i18n="recentInvoices"></h3>
@@ -203,6 +205,7 @@
           <h2 class="page-title" data-i18n="expenses"></h2>
           <button class="btn btn-gold" onclick="openExpenseModal()">+ <span data-i18n="addExpense"></span></button>
         </div>
+        <div class="cards" id="budgetCards"></div>
         <div class="tbl-wrap"><table id="expTable"></table></div>
       </section>
 
@@ -216,6 +219,8 @@
         <div class="cards" id="repCards"></div>
         <div class="panel"><h3 data-i18n="monthlySales"></h3><div class="bars" id="repBars"></div></div>
         <div class="panel"><h3 data-i18n="topProducts"></h3><div class="bars" id="repTop"></div></div>
+        <div class="panel"><h3 data-i18n="profitMarginByProduct"></h3><div class="tbl-wrap"><table id="repMargin"></table></div></div>
+        <div class="panel"><h3 data-i18n="topCustomers"></h3><div class="tbl-wrap"><table id="repTopCustomers"></table></div></div>
       </section>
 
       <!-- المساعد الذكي -->
@@ -232,19 +237,12 @@
 
       <!-- بوت تلجرام -->
       <section class="page" id="page-telegram">
-        <div class="page-head"><h2 class="page-title" data-i18n="tgTitle"></h2></div>
-        <div class="panel">
-          <p class="muted" data-i18n="tgHelp"></p><br>
-          <div class="field">
-            <label data-i18n="tgToken"></label>
-            <input id="tgToken" placeholder="123456789:AAF...">
-          </div>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <button class="btn btn-gold" id="tgStartBtn" onclick="startBot()" data-i18n="tgStart"></button>
-            <button class="btn btn-danger" onclick="stopBot()" data-i18n="tgStop"></button>
-            <span class="badge warn" id="tgState"></span>
-          </div>
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="tgTitle"></h2>
+          <button class="btn btn-gold" onclick="openTelegramBotModal()">+ <span data-i18n="addBot"></span></button>
         </div>
+        <p class="muted" data-i18n="tgHelp" style="margin-bottom:16px"></p>
+        <div id="tgBotsList"></div>
       </section>
 
       <!-- الإعدادات -->
@@ -290,6 +288,20 @@
           <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
         </div>
         <div class="panel">
+          <h3 data-i18n="currencies"></h3>
+          <div id="currenciesList"></div>
+          <div class="grid3" style="margin-top:10px">
+            <input id="newCurCode" data-i18n-ph="currencyCode" style="text-transform:uppercase">
+            <input id="newCurRate" type="number" min="0" step="0.0001" data-i18n-ph="exchangeRate">
+            <button class="btn btn-gold btn-sm" onclick="addCurrency()">+</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="budgets"></h3>
+          <div class="grid2" id="budgetInputs"></div>
+          <button class="btn btn-gold" onclick="saveBudgets()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
           <h3 data-i18n="notifSettings"></h3>
           <label class="switch-row"><input type="checkbox" id="setNotifLowStock"><span data-i18n="lowStockNotif"></span></label>
           <div style="height:10px"></div>
@@ -311,9 +323,11 @@
         </div>
         <div class="panel">
           <h3 data-i18n="dataSection"></h3>
+          <p class="muted" data-i18n="autoBackupInfo" style="margin-bottom:12px"></p>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="exportData()" data-i18n="exportData"></button>
             <button class="btn btn-ghost" onclick="importData()" data-i18n="importData"></button>
+            <button class="btn btn-ghost" onclick="bridge.openBackupsFolder()" data-i18n="openBackupsFolder"></button>
           </div>
           <input type="file" id="importFile" accept=".json" style="display:none">
         </div>
