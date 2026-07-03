@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>سند — نظام الإدارة والمحاسبة الذكي</title>
+  <link rel="icon" href="../assets/icon-64.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- شاشة التحميل -->
+  <div class="preloader" id="preloader">
+    <img class="pre-logo" src="../assets/logo.png" alt="سند">
+    <div class="pre-text" id="pre-text">سند</div>
+    <div class="pre-bar"><div class="pre-fill"></div></div>
+  </div>
+
+  <canvas id="particles-canvas"></canvas>
+
+  <!-- شاشة الدخول -->
+  <div class="auth-screen" id="loginScreen">
+    <div class="auth-card">
+      <img class="auth-logo" src="../assets/logo.png" alt="سند">
+      <h2 data-i18n="login"></h2>
+      <p class="muted" id="loginSubtitle" data-i18n="tagline"></p>
+      <div class="demo-hint" id="demoHint">
+        <span data-i18n="demoHint"></span>
+        <div class="demo-creds" dir="ltr"><code>admin</code> / <code>admin123</code></div>
+      </div>
+      <div class="field"><label data-i18n="username"></label><input id="loginUser" autocomplete="username"></div>
+      <div class="field"><label data-i18n="password"></label><input id="loginPass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <div class="auth-error" id="loginError"></div>
+      <button class="btn btn-gold" style="width:100%;justify-content:center" onclick="doLogin()" data-i18n="loginBtn"></button>
+    </div>
+  </div>
+
+  <!-- شاشة القفل -->
+  <div class="auth-screen" id="lockScreen">
+    <div class="auth-card">
+      <img class="auth-logo" src="../assets/logo.png" alt="سند">
+      <h2 data-i18n="lock"></h2>
+      <div class="field"><label data-i18n="password"></label><input id="lockPass" type="password" onkeydown="if(event.key==='Enter')doUnlock()"></div>
+      <div class="auth-error" id="lockError"></div>
+      <button class="btn btn-gold" style="width:100%;justify-content:center" onclick="doUnlock()" data-i18n="loginBtn"></button>
+    </div>
+  </div>
+
+  <div class="app hidden" id="appShell">
+    <!-- الشريط الجانبي -->
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="../assets/logo.png" alt="سند">
+        <div>
+          <div class="brand-name" id="brandName">سند</div>
+          <div class="brand-tag" data-i18n="tagline"></div>
+        </div>
+      </div>
+      <nav class="nav-scroll">
+        <div class="nav-item active" data-page="dashboard"><span class="ic">◈</span><span data-i18n="dashboard"></span></div>
+        <div class="nav-item" data-page="invoices"><span class="ic">▤</span><span data-i18n="invoices"></span></div>
+        <div class="nav-item" data-page="purchases"><span class="ic">⇩</span><span data-i18n="purchases"></span></div>
+        <div class="nav-item" data-page="products"><span class="ic">▣</span><span data-i18n="products"></span></div>
+        <div class="nav-item" data-page="customers"><span class="ic">◉</span><span data-i18n="customers"></span></div>
+        <div class="nav-item" data-page="suppliers"><span class="ic">◎</span><span data-i18n="suppliers"></span></div>
+        <div class="nav-item" data-page="debts"><span class="ic">⧖</span><span data-i18n="debts"></span></div>
+        <div class="nav-item" data-page="employees"><span class="ic">◈</span><span data-i18n="employees"></span></div>
+        <div class="nav-item" data-page="shareholders"><span class="ic">◇</span><span data-i18n="shareholders"></span></div>
+        <div class="nav-item" data-page="expenses"><span class="ic">▽</span><span data-i18n="expenses"></span></div>
+        <div class="nav-item" data-page="reports"><span class="ic">◫</span><span data-i18n="reports"></span></div>
+        <div class="nav-item" data-page="assistant"><span class="ic">✦</span><span data-i18n="assistant"></span></div>
+        <div class="nav-item" data-page="telegram"><span class="ic">➤</span><span data-i18n="telegram"></span></div>
+        <div class="nav-item" data-page="settings"><span class="ic">⚙</span><span data-i18n="settings"></span></div>
+      </nav>
+      <div class="sidebar-foot">
+        <button class="foot-btn" id="themeBtn" onclick="toggleTheme()"><span class="ic">☾</span><span id="themeLabel"></span></button>
+        <button class="foot-btn" onclick="lockApp()"><span class="ic">🔒</span><span data-i18n="lock"></span></button>
+        <div class="ai-badge"><span class="dot" id="aiDot"></span><span id="aiStatus"></span></div>
+      </div>
+    </aside>
+
+    <!-- المحتوى -->
+    <main class="main">
+
+      <!-- لوحة التحكم -->
+      <section class="page active" id="page-dashboard">
+        <div class="page-head"><h2 class="page-title" data-i18n="dashboard"></h2></div>
+        <div class="cards" id="dashCards"></div>
+        <div class="panel">
+          <h3 data-i18n="recentInvoices"></h3>
+          <div class="tbl-wrap"><table id="dashInvTable"></table></div>
+        </div>
+      </section>
+
+      <!-- المبيعات / الفواتير -->
+      <section class="page" id="page-invoices">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="invoices"></h2>
+          <button class="btn btn-gold" onclick="openInvoiceModal()">+ <span data-i18n="newInvoice"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="invTable"></table></div>
+      </section>
+
+      <!-- المشتريات -->
+      <section class="page" id="page-purchases">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="purchases"></h2>
+          <button class="btn btn-gold" onclick="openPurchaseModal()">+ <span data-i18n="newPurchase"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="purTable"></table></div>
+      </section>
+
+      <!-- المنتجات -->
+      <section class="page" id="page-products">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="products"></h2>
+          <button class="btn btn-gold" onclick="openProductModal()">+ <span data-i18n="addProduct"></span></button>
+        </div>
+        <div class="field"><input id="prodSearch" data-i18n-ph="search" oninput="renderProducts()"></div>
+        <div class="tbl-wrap"><table id="prodTable"></table></div>
+      </section>
+
+      <!-- العملاء -->
+      <section class="page" id="page-customers">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="customers"></h2>
+          <button class="btn btn-gold" onclick="openCustomerModal()">+ <span data-i18n="addCustomer"></span></button>
+        </div>
+        <div class="field"><input id="custSearch" data-i18n-ph="search" oninput="renderCustomers()"></div>
+        <div class="tbl-wrap"><table id="custTable"></table></div>
+      </section>
+
+      <!-- الموردون -->
+      <section class="page" id="page-suppliers">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="suppliers"></h2>
+          <button class="btn btn-gold" onclick="openSupplierModal()">+ <span data-i18n="addSupplier"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="supTable"></table></div>
+      </section>
+
+      <!-- الديون -->
+      <section class="page" id="page-debts">
+        <div class="page-head"><h2 class="page-title" data-i18n="debts"></h2></div>
+        <div class="cards" id="debtCards"></div>
+        <div class="panel">
+          <h3 data-i18n="customerDebts"></h3>
+          <div class="tbl-wrap"><table id="custDebtTable"></table></div>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="supplierDebts"></h3>
+          <div class="tbl-wrap"><table id="supDebtTable"></table></div>
+        </div>
+      </section>
+
+      <!-- الموظفون -->
+      <section class="page" id="page-employees">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="employees"></h2>
+          <button class="btn btn-gold" onclick="openEmployeeModal()">+ <span data-i18n="addEmployee"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="empTable"></table></div>
+      </section>
+
+      <!-- المساهمون -->
+      <section class="page" id="page-shareholders">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="shareholders"></h2>
+          <button class="btn btn-gold" onclick="openShareholderModal()">+ <span data-i18n="addShareholder"></span></button>
+        </div>
+        <div class="cards" id="shCards"></div>
+        <div class="panel">
+          <h3 data-i18n="distribution"></h3>
+          <p class="muted" id="shProfitBase"></p>
+          <div class="tbl-wrap"><table id="shTable"></table></div>
+        </div>
+      </section>
+
+      <!-- المصاريف -->
+      <section class="page" id="page-expenses">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="expenses"></h2>
+          <button class="btn btn-gold" onclick="openExpenseModal()">+ <span data-i18n="addExpense"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="expTable"></table></div>
+      </section>
+
+      <!-- التقارير -->
+      <section class="page" id="page-reports">
+        <div class="page-head"><h2 class="page-title" data-i18n="reports"></h2></div>
+        <div class="cards" id="repCards"></div>
+        <div class="panel"><h3 data-i18n="monthlySales"></h3><div class="bars" id="repBars"></div></div>
+        <div class="panel"><h3 data-i18n="topProducts"></h3><div class="bars" id="repTop"></div></div>
+      </section>
+
+      <!-- المساعد الذكي -->
+      <section class="page" id="page-assistant">
+        <div class="page-head"><h2 class="page-title" data-i18n="assistant"></h2></div>
+        <div class="panel chat-box">
+          <div class="chat-log" id="chatLog"></div>
+          <div class="chat-input">
+            <input id="chatInput" data-i18n-ph="askPlaceholder" onkeydown="if(event.key==='Enter')sendChat()">
+            <button class="btn btn-gold" onclick="sendChat()" data-i18n="send"></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- بوت تلجرام -->
+      <section class="page" id="page-telegram">
+        <div class="page-head"><h2 class="page-title" data-i18n="tgTitle"></h2></div>
+        <div class="panel">
+          <p class="muted" data-i18n="tgHelp"></p><br>
+          <div class="field">
+            <label data-i18n="tgToken"></label>
+            <input id="tgToken" placeholder="123456789:AAF...">
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-gold" id="tgStartBtn" onclick="startBot()" data-i18n="tgStart"></button>
+            <button class="btn btn-danger" onclick="stopBot()" data-i18n="tgStop"></button>
+            <span class="badge warn" id="tgState"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- الإعدادات -->
+      <section class="page" id="page-settings">
+        <div class="page-head"><h2 class="page-title" data-i18n="settings"></h2></div>
+        <div class="panel">
+          <div class="grid2">
+            <div class="field"><label data-i18n="language"></label>
+              <select id="setLang">
+                <option value="ar">العربية</option>
+                <option value="fr">Français</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div class="field"><label data-i18n="currency"></label><input id="setCurrency"></div>
+            <div class="field"><label data-i18n="businessName"></label><input id="setBiz"></div>
+            <div class="field"><label data-i18n="aiModel"></label><input id="setModel"></div>
+          </div>
+          <div class="field"><label data-i18n="anthropicKey"></label><input id="setKey" type="password" placeholder="sk-ant-..."></div>
+          <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="security"></h3>
+          <label class="switch-row">
+            <input type="checkbox" id="setAuthEnabled">
+            <span data-i18n="enableLogin"></span>
+          </label>
+          <div class="grid2" style="margin-top:12px">
+            <div class="field"><label data-i18n="changeUser"></label><input id="setUsername"></div>
+            <div class="field"><label data-i18n="newPassword"></label><input id="setNewPass" type="password" placeholder="••••••••"></div>
+          </div>
+          <button class="btn btn-gold" onclick="saveSecurity()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="dataSection"></h3>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="exportData()" data-i18n="exportData"></button>
+            <button class="btn btn-ghost" onclick="importData()" data-i18n="importData"></button>
+          </div>
+          <input type="file" id="importFile" accept=".json" style="display:none">
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- نافذة منبثقة عامة -->
+  <div class="modal-bg" id="modalBg"><div class="modal" id="modalBox"></div></div>
+
+  <!-- الإشعار -->
+  <div class="toast" id="toast"></div>
+
+  <!-- منطقة الطباعة -->
+  <div id="print-area"></div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

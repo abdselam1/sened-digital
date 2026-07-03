@@ -1,0 +1,55 @@
+{
+  "name": "sened",
+  "productName": "سند",
+  "version": "1.0.0",
+  "description": "سند — نظام إدارة ومحاسبة ذكي ثلاثي اللغة مدعوم بالذكاء الاصطناعي وبوت تلجرام | Sened — AI-powered trilingual business management & accounting system",
+  "main": "main.js",
+  "author": "abdselam1",
+  "license": "MIT",
+  "homepage": "https://github.com/abdselam1/sened-digital",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abdselam1/sened-digital.git"
+  },
+  "keywords": [
+    "electron",
+    "accounting",
+    "management",
+    "pos",
+    "arabic",
+    "ai",
+    "telegram-bot",
+    "shareholders"
+  ],
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.abdselam1.sened",
+    "productName": "سند",
+    "icon": "assets/icon.ico",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon-512.png"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon-512.png"
+    }
+  }
+}
