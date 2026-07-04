@@ -37,7 +37,8 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "builtin-ai.json"
     ],
     "win": {
       "target": "nsis",

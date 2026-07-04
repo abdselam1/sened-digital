@@ -8,6 +8,30 @@ const crypto = require('crypto');
 let win = null;
 const DATA_FILE = () => path.join(app.getPath('userData'), 'sened-data.json');
 
+// المفتاح المشترك المدمج: ملف builtin-ai.json يُشحن مع نسخة التطبيق الموزّعة (مُستثنى من المستودع العام عبر .gitignore)
+// — يجعل كل الزبائن يحصلون على الذكاء الاصطناعي بلا حساب أو تعاقد منهم. يُقرأ مرة واحدة.
+let BUILTIN_AI = null;
+function builtinAiProvider() {
+  if (BUILTIN_AI !== null) return BUILTIN_AI || null;
+  try {
+    const p = path.join(__dirname, 'builtin-ai.json');
+    if (fs.existsSync(p)) {
+      const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (cfg && cfg.apiKey && cfg.baseUrl && cfg.model) {
+        BUILTIN_AI = { id: 'builtin', name: cfg.name || 'Sened AI', type: cfg.type || 'openai-compatible', baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, builtin: true };
+        return BUILTIN_AI;
+      }
+    }
+  } catch (e) { /* تجاهل */ }
+  BUILTIN_AI = false;
+  return null;
+}
+function writeBuiltinAi(cfg) {
+  const p = path.join(__dirname, 'builtin-ai.json');
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
+  BUILTIN_AI = null; // أعد التحميل في المرة القادمة
+}
+
 // كلمة المرور تُخزَّن كـ sha256(ملح + كلمة المرور)؛ الملح يُولَّد عشوائياً لكل تنصيب.
 // ملفات بيانات قديمة (قبل هذا التحديث) لا تحتوي "salt" — نتحقق منها بالنمط القديم غير المملَّح للتوافق.
 function hashPass(p, salt) { return crypto.createHash('sha256').update((salt || '') + String(p)).digest('hex'); }
@@ -20,6 +44,7 @@ const DEFAULT_DATA = {
   settings: {
     lang: 'ar', businessName: 'سند', currency: 'MRU', telegramBots: [],
     aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
+    aiProviders: [], activeProviderId: '',
     auth: { enabled: false, username: 'admin', salt: FRESH_AUTH_SALT, passwordHash: hashPass('admin123', FRESH_AUTH_SALT) },
     company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
     notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
@@ -239,6 +264,50 @@ function askClaude(key, messages, onChunk) {
   });
 }
 
+// ---------- مزوّد متوافق مع OpenAI (يغطي Groq / Gemini / OpenAI / OpenRouter / DeepSeek بمسار واحد) ----------
+// كلها تستخدم نفس صيغة chat/completions مع بث SSE، فتكفي دالة واحدة لعشرات المزودات السحابية.
+function askOpenAICompatible(provider, messages, onChunk) {
+  return new Promise((resolve, reject) => {
+    let base;
+    try { base = new URL(provider.baseUrl); } catch (e) { return reject(new Error('BASE_URL_INVALID')); }
+    const apiPath = (base.pathname.replace(/\/$/, '')) + '/chat/completions';
+    const body = JSON.stringify({
+      model: provider.model, messages, stream: true, max_tokens: 600, temperature: 0.4
+    });
+    const isHttps = base.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const req = lib.request({
+      hostname: base.hostname, port: base.port || (isHttps ? 443 : 80), path: apiPath, method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
+        'Content-Length': Buffer.byteLength(body)
+      }, timeout: 60000
+    }, res => {
+      let full = '', gotError = null;
+      readLines(res, line => {
+        if (!line.startsWith('data: ')) return;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') return;
+        try {
+          const j = JSON.parse(payload);
+          if (j.error) { gotError = j.error.message || 'PROVIDER_ERROR'; return; }
+          const delta = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
+          if (delta) { full += delta; if (onChunk) onChunk(delta); }
+        } catch (e) { /* سطر غير مكتمل */ }
+      });
+      res.on('end', () => {
+        if (gotError) reject(new Error(gotError));
+        else if (full) resolve(full);
+        else reject(new Error('PROVIDER_EMPTY'));
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('PROVIDER_TIMEOUT')); });
+    req.write(body); req.end();
+  });
+}
+
 function walletBalance(d, walletId) {
   return d.walletTx.reduce((bal, t) => {
     if (t.type === 'deposit' && t.walletId === walletId) return bal + Number(t.amount);
@@ -286,18 +355,49 @@ function businessContext(d) {
 
 // preloadedData: تمرير بيانات مُحمَّلة مسبقاً (مثلاً من بوت تلجرام) لتفادي قراءة ملف البيانات من القرص مرتين لكل رسالة.
 // onReset: يُستدعى إن بدأ Claude ببث نص جزئي ثم فشل، قبل التراجع إلى أولاما — لمسح النص الجزئي من الواجهة بدل دمجه مع رد مختلف.
+// يعيد قائمة المزودات الفعّالة بالترتيب: النشط أولاً ثم البقية كاحتياطي.
+// يدمج الإعدادات القديمة (anthropicKey/aiModel) كمزوّدات ضمنية للتوافق الرجعي.
+function resolveProviders(d) {
+  const userList = (d.settings.aiProviders || []).filter(p => p.enabled !== false);
+  const all = userList.slice();
+  // رتّب المزوّد النشط أولاً
+  const activeId = d.settings.activeProviderId;
+  if (activeId) {
+    const idx = all.findIndex(p => p.id === activeId);
+    if (idx > 0) { const [active] = all.splice(idx, 1); all.unshift(active); }
+  }
+  // المفتاح المشترك المدمج كاحتياطي (أو كافتراضي إن لم يضبط الزبون شيئاً)
+  const builtin = builtinAiProvider();
+  if (builtin) all.push(builtin);
+  // توافق رجعي مع الإعدادات القديمة
+  if (!all.length) {
+    if (d.settings.anthropicKey) all.push({ id: 'legacy-claude', type: 'anthropic', apiKey: d.settings.anthropicKey });
+    all.push({ id: 'legacy-ollama', type: 'ollama', model: d.settings.aiModel || 'qwen2:latest' });
+  }
+  return all;
+}
+
+async function callProvider(provider, messages, onChunk) {
+  if (provider.type === 'ollama') return askOllama(provider.model || 'qwen2:latest', messages, onChunk);
+  if (provider.type === 'anthropic') return askClaude(provider.apiKey, messages, onChunk);
+  return askOpenAICompatible(provider, messages, onChunk); // openai-compatible وكل مشتقاته
+}
+
 async function askAI(userText, history = [], onChunk, preloadedData, onReset) {
   const d = preloadedData || loadData();
   const messages = [{ role: 'system', content: businessContext(d) }, ...history, { role: 'user', content: userText }];
-  if (d.settings.anthropicKey) {
+  const providers = resolveProviders(d);
+  let lastErr = null;
+  for (const provider of providers) {
     let emittedAny = false;
     try {
-      return await askClaude(d.settings.anthropicKey, messages, delta => { emittedAny = true; if (onChunk) onChunk(delta); });
+      return await callProvider(provider, messages, delta => { emittedAny = true; if (onChunk) onChunk(delta); });
     } catch (e) {
-      if (emittedAny && onReset) onReset();
+      lastErr = e;
+      if (emittedAny && onReset) onReset(); // امسح النص الجزئي قبل تجربة المزوّد التالي
     }
   }
-  return await askOllama(d.settings.aiModel || 'qwen2:latest', messages, onChunk);
+  throw lastErr || new Error('NO_PROVIDER');
 }
 
 // ---------- بوت تلجرام (خانات متعددة — نفس منطق الأوامر لكل بوت) ----------
@@ -478,6 +578,12 @@ ipcMain.handle('ai:ask', async (e, { text, history }) => {
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('ai:check', async () => {
+  const d = loadData();
+  const active = resolveProviders(d)[0];
+  // مزوّد سحابي: يكفي وجود مفتاح — لا حاجة لفحص محلي، يُعتبر متاحاً (يتحقق فعلياً عند أول سؤال)
+  if (active && active.type !== 'ollama') {
+    return { ok: !!active.apiKey, cloud: true, providerName: active.name || active.type };
+  }
   return new Promise(resolve => {
     const req = http.get({ hostname: '127.0.0.1', port: 11434, path: '/api/tags', timeout: 3000 }, res => {
       let out = ''; res.on('data', c => out += c);
@@ -556,6 +662,23 @@ ipcMain.handle('license:createGist', async (e, token) => {
     return { ok: true, gistId: gist.id };
   } catch (err) { return { ok: false, error: err.message }; }
 });
+// المطوّر فقط: يكتب المفتاح المشترك في builtin-ai.json ليُشحن مع النسخة الموزّعة
+ipcMain.handle('ai:setBuiltinKey', async (e, cfg) => {
+  try {
+    if (!cfg || !cfg.apiKey) { // مسح المفتاح
+      const p = path.join(__dirname, 'builtin-ai.json');
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+      BUILTIN_AI = null;
+      return { ok: true, cleared: true };
+    }
+    writeBuiltinAi({ name: cfg.name || 'Sened AI', type: 'openai-compatible', baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model });
+    return { ok: true };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+ipcMain.handle('ai:builtinInfo', () => {
+  const b = builtinAiProvider();
+  return b ? { present: true, name: b.name, model: b.model } : { present: false };
+});
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
   if (d.settings.auth.username === username) {
@@ -603,7 +726,8 @@ app.whenReady().then(() => {
   takeBackup();
   checkLicenseStatus();
   const d = loadData();
-  if (!d.settings.anthropicKey) warmUpOllama(d.settings.aiModel || 'qwen2:latest');
+  const active = resolveProviders(d)[0];
+  if (active && active.type === 'ollama') warmUpOllama(active.model || 'qwen2:latest');
   setInterval(takeBackup, 60 * 60 * 1000); // نسخة احتياطية إضافية كل ساعة أثناء التشغيل
   setInterval(checkLicenseStatus, 30 * 60 * 1000); // تحقق من حالة الترخيص كل نصف ساعة
 });

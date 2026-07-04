@@ -47,7 +47,9 @@ const bridge = window.sened || {
   licenseCheckNow: async () => true,
   licenseRegenClaimCode: async () => 'BROWSER',
   licenseCreateGist: async () => ({ ok: false, error: 'BROWSER' }),
-  onLicenseStatus: () => {}
+  onLicenseStatus: () => {},
+  aiSetBuiltinKey: async () => ({ ok: false, error: 'BROWSER' }),
+  aiBuiltinInfo: async () => ({ present: false })
 };
 
 // ---------- الترجمة ----------
@@ -1822,6 +1824,8 @@ function fillSettings() {
   fillBudgetInputs();
   renderCurrenciesList();
   fillLicensePanel();
+  renderAiProviders();
+  renderSharedKeyStatus();
   const iv = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
   $('setInvTemplate').value = iv.template || 'classic';
   $('setInvColor').value = iv.color || '#C8A45C';
@@ -1908,6 +1912,139 @@ function applyLicenseLock(locked, message) {
   } else {
     $('licenseLockScreen').classList.remove('open');
   }
+}
+
+// ---------- مزوّدات الذكاء الاصطناعي (للزبون) ----------
+const AI_PRESETS = {
+  groq:    { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+  gemini:  { name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
+  openai:  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  openrouter: { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'meta-llama/llama-3.3-70b-instruct' },
+  deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' }
+};
+
+let builtinAiPresent = false;
+async function refreshAiBuiltin() {
+  const info = await bridge.aiBuiltinInfo();
+  builtinAiPresent = !!info.present;
+  const el = $('aiBuiltinStatus');
+  if (el) el.textContent = builtinAiPresent ? `✓ ${T.aiBuiltinActive} (${info.name || 'Sened AI'})`
+    : ((DB.settings.aiProviders || []).length ? '' : T.aiNoBuiltin);
+}
+
+function renderAiProviders() {
+  const list = DB.settings.aiProviders || [];
+  const el = $('aiProvidersList');
+  if (!el) return;
+  el.innerHTML = list.length ? list.map(p => {
+    const isActive = DB.settings.activeProviderId === p.id;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border-subtle);gap:8px">
+      <div><b>${esc(p.name)}</b> <span class="muted">— ${esc(p.model || p.type)}</span></div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm ${isActive ? 'btn-gold' : 'btn-ghost'}" onclick="setActiveProvider('${p.id}')">${isActive ? T.aiActiveProvider : '⚬'}</button>
+        <button class="btn btn-ghost btn-sm" onclick="openAiProviderModal('${p.id}')">${T.edit}</button>
+        <button class="btn btn-danger btn-sm" onclick="delAiProvider('${p.id}')">${T.delete}</button>
+      </div>
+    </div>`;
+  }).join('') : '';
+  refreshAiBuiltin();
+}
+
+function openAiProviderModal(id) {
+  const p = (DB.settings.aiProviders || []).find(x => x.id === id) || { name: '', type: 'openai-compatible', baseUrl: '', apiKey: '', model: '' };
+  openModal(`<h3>${id ? T.edit : T.aiAddProvider}</h3>
+    <div class="field"><label>${T.aiPreset}</label>
+      <select id="mAiPreset" onchange="applyAiPreset()">
+        <option value="">—</option>
+        ${Object.entries(AI_PRESETS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('')}
+        <option value="ollama">Ollama (محلي)</option>
+      </select>
+    </div>
+    <div class="field"><label>${T.aiProviderName}</label><input id="mAiName" value="${esc(p.name)}"></div>
+    <div class="field"><label>${T.aiProviderType}</label>
+      <select id="mAiType" onchange="toggleAiFields()">
+        <option value="openai-compatible" ${p.type === 'openai-compatible' ? 'selected' : ''}>OpenAI-compatible (Groq/Gemini/OpenAI...)</option>
+        <option value="ollama" ${p.type === 'ollama' ? 'selected' : ''}>Ollama (محلي)</option>
+        <option value="anthropic" ${p.type === 'anthropic' ? 'selected' : ''}>Anthropic (Claude)</option>
+      </select>
+    </div>
+    <div class="field" id="mAiBaseRow"><label>${T.aiBaseUrl}</label><input id="mAiBaseUrl" value="${esc(p.baseUrl || '')}" placeholder="https://api.groq.com/openai/v1"></div>
+    <div class="field" id="mAiKeyRow"><label>${T.aiApiKey}</label><input id="mAiKey" type="password" value="${esc(p.apiKey || '')}"></div>
+    <div class="field"><label>${T.aiModelName}</label><input id="mAiModel" value="${esc(p.model || '')}" placeholder="llama-3.3-70b-versatile"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveAiProvider('${id || ''}')">${T.save}</button>
+    </div>`);
+  toggleAiFields();
+}
+
+function applyAiPreset() {
+  const key = $('mAiPreset').value;
+  if (key === 'ollama') { $('mAiType').value = 'ollama'; $('mAiName').value = 'Ollama'; $('mAiModel').value = 'qwen2:latest'; toggleAiFields(); return; }
+  const preset = AI_PRESETS[key];
+  if (!preset) return;
+  $('mAiType').value = 'openai-compatible';
+  $('mAiName').value = preset.name;
+  $('mAiBaseUrl').value = preset.baseUrl;
+  $('mAiModel').value = preset.model;
+  toggleAiFields();
+}
+
+function toggleAiFields() {
+  const type = $('mAiType').value;
+  $('mAiBaseRow').style.display = type === 'openai-compatible' ? 'block' : 'none';
+  $('mAiKeyRow').style.display = type === 'ollama' ? 'none' : 'block';
+}
+
+async function saveAiProvider(id) {
+  const type = $('mAiType').value;
+  const obj = {
+    name: $('mAiName').value.trim() || type,
+    type,
+    baseUrl: type === 'openai-compatible' ? $('mAiBaseUrl').value.trim() : '',
+    apiKey: type === 'ollama' ? '' : $('mAiKey').value.trim(),
+    model: $('mAiModel').value.trim(),
+    enabled: true
+  };
+  if (type === 'openai-compatible' && (!obj.baseUrl || !obj.apiKey)) { toast(T.aiApiKey + ' / ' + T.aiBaseUrl); return; }
+  DB.settings.aiProviders = DB.settings.aiProviders || [];
+  if (id) Object.assign(DB.settings.aiProviders.find(x => x.id === id), obj);
+  else { const nid = uid('aip'); DB.settings.aiProviders.push({ id: nid, ...obj }); DB.settings.activeProviderId = nid; }
+  await persist(); closeModal(); renderAiProviders(); checkAI(); toast(T.saved);
+}
+
+async function delAiProvider(id) {
+  if (!confirm(T.confirmDelete)) return;
+  DB.settings.aiProviders = (DB.settings.aiProviders || []).filter(p => p.id !== id);
+  if (DB.settings.activeProviderId === id) DB.settings.activeProviderId = '';
+  await persist(); renderAiProviders(); checkAI();
+}
+
+async function setActiveProvider(id) {
+  DB.settings.activeProviderId = id;
+  await persist(); renderAiProviders(); checkAI();
+}
+
+// ---------- المفتاح المشترك (المطوّر) ----------
+async function renderSharedKeyStatus() {
+  const info = await bridge.aiBuiltinInfo();
+  const el = $('sharedKeyStatus');
+  if (el) el.textContent = info.present ? `${T.sharedKeyActive} (${info.name} — ${info.model})` : T.sharedKeyNone;
+}
+
+async function saveSharedKey() {
+  const key = $('sharedKeyInput').value.trim();
+  if (!key) return;
+  const preset = AI_PRESETS.groq;
+  const res = await bridge.aiSetBuiltinKey({ name: 'Sened AI', baseUrl: preset.baseUrl, apiKey: key, model: preset.model });
+  if (res.ok) { $('sharedKeyInput').value = ''; renderSharedKeyStatus(); toast(T.saved); }
+  else toast('⚠️ ' + (res.error || ''));
+}
+
+async function clearSharedKey() {
+  if (!confirm(T.confirmDelete)) return;
+  await bridge.aiSetBuiltinKey({});
+  renderSharedKeyStatus();
 }
 
 function renderCurrenciesList() {

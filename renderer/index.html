@@ -86,6 +86,7 @@
         <div class="nav-item" data-page="assistant"><span class="ic">✦</span><span data-i18n="assistant"></span></div>
         <div class="nav-item" data-page="telegram"><span class="ic">➤</span><span data-i18n="telegram"></span></div>
         <div class="nav-item" data-page="settings"><span class="ic">⚙</span><span data-i18n="settings"></span></div>
+        <div class="nav-item" data-page="admin"><span class="ic">⚡</span><span data-i18n="management"></span></div>
       </nav>
       <div class="sidebar-foot">
         <div class="muted" id="currentUserLabel" style="padding:2px 14px 4px"></div>
@@ -363,36 +364,10 @@
           <button class="btn btn-gold" onclick="saveSecurity()" data-i18n="save"></button>
         </div>
         <div class="panel">
-          <h3 data-i18n="licenseTitle"></h3>
-          <div class="field">
-            <label data-i18n="deviceId"></label>
-            <div style="display:flex;gap:8px">
-              <input id="licDeviceId" readonly>
-              <button type="button" class="btn btn-ghost btn-sm" onclick="copyDeviceId()" data-i18n="copy"></button>
-            </div>
-            <p class="muted" data-i18n="licenseHelpCustomer" style="margin-top:6px"></p>
-          </div>
-          <details>
-            <summary style="cursor:pointer;color:var(--gold);font-weight:800;padding:8px 0" data-i18n="adminSection"></summary>
-            <p class="muted" style="color:#e08886" data-i18n="adminWarning"></p>
-            <div id="licAdminSetup">
-              <div class="field" style="margin-top:10px"><label data-i18n="githubToken"></label><input id="licGithubToken" type="password" placeholder="ghp_..."></div>
-              <button type="button" class="btn btn-gold btn-sm" onclick="createLicenseSystem()" data-i18n="createLicenseSystem"></button>
-            </div>
-            <div id="licAdminActive" class="hidden">
-              <p class="muted" id="licGistIdLabel"></p>
-              <div class="field" style="margin-top:10px">
-                <label data-i18n="claimCode"></label>
-                <div style="display:flex;gap:8px;align-items:center">
-                  <code id="licClaimCode" style="background:var(--dark-tertiary);padding:8px 14px;border-radius:8px;font-size:1.1rem;letter-spacing:2px"></code>
-                  <button type="button" class="btn btn-ghost btn-sm" onclick="regenClaimCode()" data-i18n="regenClaimCode"></button>
-                </div>
-                <p class="muted" style="margin-top:6px" data-i18n="claimInstructions"></p>
-              </div>
-              <p class="muted" data-i18n="adminCommandsHelp" style="margin-top:10px"></p>
-            </div>
-            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="licenseCheckNowUi()" data-i18n="checkNow"></button>
-          </details>
+          <h3 data-i18n="aiProviders"></h3>
+          <p class="muted" id="aiBuiltinStatus" style="margin-bottom:12px"></p>
+          <div id="aiProvidersList"></div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="openAiProviderModal()">+ <span data-i18n="aiAddProvider"></span></button>
         </div>
         <div class="panel">
           <h3 data-i18n="dataSection"></h3>
@@ -414,6 +389,53 @@
           <div class="tbl-wrap"><table id="auditLogTable"></table></div>
         </div>
         <p class="dev-credit" data-i18n="developerCredit"></p>
+      </section>
+
+      <!-- الإدارة (المطوّر فقط) -->
+      <section class="page" id="page-admin">
+        <div class="page-head"><h2 class="page-title" data-i18n="management"></h2></div>
+        <p class="muted" data-i18n="adminManagementHint" style="margin-bottom:16px"></p>
+
+        <div class="panel">
+          <h3 data-i18n="licenseTitle"></h3>
+          <div class="field">
+            <label data-i18n="deviceId"></label>
+            <div style="display:flex;gap:8px">
+              <input id="licDeviceId" readonly>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="copyDeviceId()" data-i18n="copy"></button>
+            </div>
+            <p class="muted" data-i18n="licenseHelpCustomer" style="margin-top:6px"></p>
+          </div>
+          <div id="licAdminSetup">
+            <div class="field" style="margin-top:10px"><label data-i18n="githubToken"></label><input id="licGithubToken" type="password" placeholder="ghp_..."></div>
+            <button type="button" class="btn btn-gold btn-sm" onclick="createLicenseSystem()" data-i18n="createLicenseSystem"></button>
+          </div>
+          <div id="licAdminActive" class="hidden">
+            <p class="muted" id="licGistIdLabel"></p>
+            <div class="field" style="margin-top:10px">
+              <label data-i18n="claimCode"></label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <code id="licClaimCode" style="background:var(--dark-tertiary);padding:8px 14px;border-radius:8px;font-size:1.1rem;letter-spacing:2px"></code>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="regenClaimCode()" data-i18n="regenClaimCode"></button>
+              </div>
+              <p class="muted" style="margin-top:6px" data-i18n="claimInstructions"></p>
+            </div>
+            <p class="muted" data-i18n="adminCommandsHelp" style="margin-top:10px"></p>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="licenseCheckNowUi()" data-i18n="checkNow"></button>
+        </div>
+
+        <div class="panel">
+          <h3 data-i18n="sharedKeyTitle"></h3>
+          <p class="muted" data-i18n="sharedKeyHelp" style="margin-bottom:12px"></p>
+          <p class="muted" id="sharedKeyStatus" style="margin-bottom:10px"></p>
+          <div class="field"><label data-i18n="aiApiKey"></label><input id="sharedKeyInput" type="password" placeholder="gsk_..."></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-gold btn-sm" onclick="saveSharedKey()" data-i18n="saveSharedKey"></button>
+            <button class="btn btn-danger btn-sm" onclick="clearSharedKey()" data-i18n="clearSharedKey"></button>
+          </div>
+          <p class="muted" data-i18n="rebuildReminder" style="margin-top:10px;color:#e0b060"></p>
+        </div>
       </section>
     </main>
   </div>
