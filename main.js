@@ -23,13 +23,22 @@ const DEFAULT_DATA = {
     auth: { enabled: false, username: 'admin', salt: FRESH_AUTH_SALT, passwordHash: hashPass('admin123', FRESH_AUTH_SALT) },
     company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
     notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
-    expenseBudgets: {}, onboardingDismissed: false, currencies: []
+    expenseBudgets: {}, onboardingDismissed: false, currencies: [],
+    invoice: { template: 'classic', color: '#C8A45C' },
+    expenseCategoryList: ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'],
+    productCategoryList: [],
+    license: {
+      deviceId: crypto.randomUUID(),
+      gistId: '', gistToken: '', // فارغان دائماً لدى الزبائن — يُملآن فقط في نسخة المطوّر
+      ownerChatId: '', claimCode: crypto.randomBytes(4).toString('hex').toUpperCase(),
+      locked: false, message: '', lastCheck: ''
+    }
   },
-  products: [], customers: [], invoices: [], expenses: [],
+  products: [], customers: [], invoices: [], expenses: [], quotes: [],
   purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
   wallets: [], walletTx: [],
   auditLog: [], trash: [], returns: [],
-  counters: { invoice: 1, purchase: 1 }
+  counters: { invoice: 1, purchase: 1, quote: 1 }
 };
 
 function loadData() {
@@ -47,7 +56,8 @@ function loadData() {
           ...DEFAULT_DATA.settings, ...saved.settings,
           auth,
           company: { ...DEFAULT_DATA.settings.company, ...(saved.settings && saved.settings.company) },
-          notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) }
+          notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) },
+          license: { ...DEFAULT_DATA.settings.license, ...(saved.settings && saved.settings.license) }
         },
         counters: { ...DEFAULT_DATA.counters, ...saved.counters }
       };
@@ -73,6 +83,64 @@ function takeBackup() {
     const files = fs.readdirSync(BACKUP_DIR()).filter(f => f.startsWith('sened-backup-')).sort();
     while (files.length > MAX_BACKUPS) fs.unlinkSync(path.join(BACKUP_DIR(), files.shift()));
   } catch (e) { console.error('backup error', e); }
+}
+
+// ---------- الترخيص والإدارة عن بُعد ----------
+// المُعرِّف العام لملف الحالة المشترك (Gist) — ليس سرياً، يُملأ مرة واحدة بعد إنشائه.
+// إن تُرك فارغاً، نظام الترخيص معطَّل تماماً بأمان (لا قفل لأي أحد).
+const DEFAULT_LICENSE_GIST_ID = '';
+
+function githubApi(token, method, apiPath, body) {
+  return new Promise((resolve, reject) => {
+    const bodyStr = body ? JSON.stringify(body) : null;
+    const headers = { 'User-Agent': 'sened-app', 'Accept': 'application/vnd.github+json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (bodyStr) headers['Content-Type'] = 'application/json';
+    const req = https.request({ hostname: 'api.github.com', path: apiPath, method, headers, timeout: 15000 }, res => {
+      let out = '';
+      res.on('data', c => out += c);
+      res.on('end', () => { try { resolve(JSON.parse(out)); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('GITHUB_TIMEOUT')); });
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+async function readGistStatus(gistId) {
+  const gist = await githubApi(null, 'GET', `/gists/${gistId}`);
+  const file = Object.values(gist.files || {})[0];
+  if (!file) throw new Error('EMPTY_GIST');
+  try { return JSON.parse(file.content); } catch (e) { return { locked: [], names: {}, messages: {} }; }
+}
+
+async function writeGistStatus(gistId, token, mutatorFn) {
+  const gist = await githubApi(token, 'GET', `/gists/${gistId}`);
+  const filename = Object.keys(gist.files || {})[0];
+  if (!filename) throw new Error('EMPTY_GIST');
+  const data = (() => { try { return JSON.parse(gist.files[filename].content); } catch (e) { return { locked: [], names: {}, messages: {} }; } })();
+  mutatorFn(data);
+  await githubApi(token, 'PATCH', `/gists/${gistId}`, { files: { [filename]: { content: JSON.stringify(data, null, 2) } } });
+  return data;
+}
+
+async function checkLicenseStatus() {
+  const d = loadData();
+  const lic = d.settings.license || {};
+  const gistId = lic.gistId || DEFAULT_LICENSE_GIST_ID;
+  if (!gistId) return; // النظام غير مفعَّل — لا شيء يحدث
+  try {
+    const status = await readGistStatus(gistId);
+    const locked = (status.locked || []).includes(lic.deviceId);
+    const message = (status.messages || {})[lic.deviceId] || '';
+    const fresh = loadData();
+    fresh.settings.license.locked = locked;
+    fresh.settings.license.message = message;
+    fresh.settings.license.lastCheck = new Date().toISOString();
+    saveData(fresh);
+    if (win && !win.isDestroyed()) win.webContents.send('license:status', { locked, message });
+  } catch (e) { /* بلا إنترنت أو خطأ مؤقت — نُبقي آخر حالة معروفة، لا عقاب على انقطاع الشبكة */ }
 }
 
 // يقرأ استجابة HTTP سطراً سطراً (NDJSON أو SSE)، ويُفرِّغ آخر سطر متبقٍ عند إغلاق
@@ -116,6 +184,22 @@ function askOllama(model, messages, onChunk) {
     req.on('timeout', () => { req.destroy(); reject(new Error('OLLAMA_TIMEOUT')); });
     req.write(body); req.end();
   });
+}
+
+// يحمّل نموذج أولاما إلى الذاكرة في الخلفية عند بدء التطبيق (بدل انتظار أول سؤال من المستخدم)
+// — تحميل النموذج لأول مرة قد يستغرق 15+ ثانية على أجهزة بلا كرت شاشة مخصص، فتحميله مبكراً
+// يجعل أول سؤال فعلي من المستخدم يحصل على سرعة الاستجابة الطبيعية بدل الانتظار الكامل.
+function warmUpOllama(model) {
+  try {
+    const body = JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], stream: false, keep_alive: '30m', options: { num_predict: 1 } });
+    const req = http.request({
+      hostname: '127.0.0.1', port: 11434, path: '/api/chat', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 60000
+    }, res => { res.on('data', () => {}); res.on('end', () => {}); });
+    req.on('error', () => {}); // أولاما غير مشغّل — لا بأس، سيُكتشف لاحقاً عادياً عند الاستخدام الفعلي
+    req.on('timeout', () => req.destroy());
+    req.write(body); req.end();
+  } catch (e) { /* تجاهل بصمت */ }
 }
 
 // ---------- Claude API (اختياري إن وُضع مفتاح) ----------
@@ -279,11 +363,85 @@ async function tgHandle(token, msg) {
     reply = d.wallets.length
       ? '🏦 المحافظ والحسابات:\n\n' + d.wallets.map(w => `• ${w.name} (${w.type}): ${Math.round(walletBalance(d, w.id))} ${c}`).join('\n')
       : 'لا توجد محافظ مسجلة بعد.';
+  } else if (text.startsWith('/claim ')) {
+    const code = text.slice(7).trim();
+    if (d.settings.license.ownerChatId) {
+      reply = '⚠️ هذا البوت مرتبط بالفعل بحساب إدارة.';
+    } else if (code === d.settings.license.claimCode) {
+      d.settings.license.ownerChatId = String(chatId);
+      saveData(d);
+      reply = '✓ تم تفعيل صلاحيات الإدارة لهذا الحساب. أرسل /clients لرؤية العملاء.';
+    } else {
+      reply = '⚠️ رمز غير صحيح.';
+    }
+  } else if (/^\/(register|clients|lock|unlock|msg)\b/.test(text)) {
+    reply = await handleAdminCommand(d, chatId, text);
   } else if (text) {
     try { reply = await askAI(text, [], null, d); }
     catch (e) { reply = '⚠️ الذكاء الاصطناعي غير متاح حالياً. تأكد من تشغيل أولاما على الجهاز.'; }
   }
   if (reply) await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
+}
+
+async function handleAdminCommand(d, chatId, text) {
+  const isOwner = d.settings.license.ownerChatId && String(d.settings.license.ownerChatId) === String(chatId);
+  if (!isOwner) return '⚠️ هذا الأمر مخصص لحساب الإدارة فقط. استخدم /claim <الرمز> أولاً من إعدادات التطبيق → الترخيص.';
+  const gistId = d.settings.license.gistId;
+  const gistToken = d.settings.license.gistToken;
+  if (!gistId || !gistToken) return '⚠️ لم تُضبط بيانات نظام الترخيص بعد (Gist ID والرمز) من الإعدادات.';
+
+  function resolveId(status, nameOrId) {
+    const byName = Object.entries(status.names || {}).find(([id, n]) => n.toLowerCase() === nameOrId.toLowerCase());
+    return byName ? byName[0] : nameOrId;
+  }
+
+  try {
+    if (text.startsWith('/register ')) {
+      const parts = text.slice(10).trim().split(/\s+/);
+      const deviceId = parts.shift();
+      const name = parts.join(' ') || deviceId;
+      if (!deviceId) return 'الاستخدام: /register <رقم الجهاز> <اسم الزبون>';
+      const status = await writeGistStatus(gistId, gistToken, s => { s.names = s.names || {}; s.names[deviceId] = name; });
+      return `✓ سُجِّل "${name}" — الآن لديك ${Object.keys(status.names).length} عميل مسجَّل.`;
+    }
+    if (text === '/clients') {
+      const status = await readGistStatus(gistId);
+      const names = status.names || {};
+      const locked = status.locked || [];
+      if (!Object.keys(names).length) return 'لا يوجد عملاء مسجلون بعد. استخدم /register <رقم الجهاز> <الاسم>.';
+      return '👥 العملاء:\n\n' + Object.entries(names).map(([id, name]) => `• ${name}${locked.includes(id) ? ' — 🔒 موقوف' : ' — ✓ نشط'}`).join('\n');
+    }
+    if (text.startsWith('/lock ')) {
+      const nameOrId = text.slice(6).trim();
+      const status = await writeGistStatus(gistId, gistToken, s => {
+        const id = resolveId(s, nameOrId);
+        s.locked = s.locked || [];
+        if (!s.locked.includes(id)) s.locked.push(id);
+      });
+      return `🔒 تم إيقاف "${nameOrId}".`;
+    }
+    if (text.startsWith('/unlock ')) {
+      const nameOrId = text.slice(8).trim();
+      await writeGistStatus(gistId, gistToken, s => {
+        const id = resolveId(s, nameOrId);
+        s.locked = (s.locked || []).filter(x => x !== id);
+      });
+      return `🔓 تم تفعيل "${nameOrId}" مجدداً.`;
+    }
+    if (text.startsWith('/msg ')) {
+      const rest = text.slice(5).trim();
+      const [nameOrId, ...msgParts] = rest.split(/\s+/);
+      const message = msgParts.join(' ');
+      if (!nameOrId || !message) return 'الاستخدام: /msg <اسم الزبون> <الرسالة>';
+      await writeGistStatus(gistId, gistToken, s => {
+        const id = resolveId(s, nameOrId);
+        s.messages = s.messages || {};
+        s.messages[id] = message;
+      });
+      return `✓ أُرسلت رسالة إلى "${nameOrId}" — ستظهر في تطبيقه عند تحققه القادم.`;
+    }
+  } catch (err) { return '⚠️ خطأ في الاتصال بنظام الترخيص: ' + err.message; }
+  return null;
 }
 
 async function tgLoop(botId) {
@@ -329,6 +487,18 @@ ipcMain.handle('ai:check', async () => {
     req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
   });
 });
+// أسماء الأوامر يجب أن تكون بأحرف إنجليزية صغيرة فقط حسب قواعد تلجرام (a-z0-9_)
+// — تظهر بهذا الشكل في قائمة الاقتراحات، لكن الوصف بالعربية، والبوت يقبل أيضاً الاسم العربي المكافئ عند الكتابة اليدوية
+const TG_COMMANDS = [
+  { command: 'start', description: 'بدء استخدام البوت' },
+  { command: 'summary', description: 'ملخص المبيعات اليومي والإجمالي' },
+  { command: 'products', description: 'حالة المخزون الحالية' },
+  { command: 'invoices', description: 'آخر الفواتير المسجّلة' },
+  { command: 'shareholders', description: 'توزيع الأرباح على المساهمين' },
+  { command: 'debts', description: 'ديون العملاء غير المحصّلة' },
+  { command: 'wallets', description: 'أرصدة المحافظ والحسابات' }
+];
+
 ipcMain.handle('tg:start', async (e, { id, token }) => {
   try {
     const me = await tgApi(token, 'getMe');
@@ -336,6 +506,7 @@ ipcMain.handle('tg:start', async (e, { id, token }) => {
     const existing = tgBots.get(id);
     tgBots.set(id, { token, running: true, offset: existing ? existing.offset : 0 });
     if (!existing || !existing.running) tgLoop(id);
+    tgApi(token, 'setMyCommands', { commands: TG_COMMANDS }).catch(() => {});
     return { ok: true, name: me.result.username };
   } catch (err) { return { ok: false, error: err.message }; }
 });
@@ -361,6 +532,30 @@ ipcMain.handle('app:exportPdf', async (e, suggestedName) => {
 });
 ipcMain.handle('app:openExternal', (e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('app:openBackupsFolder', () => { takeBackup(); shell.openPath(BACKUP_DIR()); return true; });
+ipcMain.handle('license:checkNow', async () => { await checkLicenseStatus(); return true; });
+ipcMain.handle('license:regenClaimCode', () => {
+  const d = loadData();
+  d.settings.license.claimCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+  d.settings.license.ownerChatId = '';
+  saveData(d);
+  return d.settings.license.claimCode;
+});
+ipcMain.handle('license:createGist', async (e, token) => {
+  try {
+    const initial = { locked: [], names: {}, messages: {} };
+    const gist = await githubApi(token, 'POST', '/gists', {
+      description: 'Sened license status (managed by the app — do not edit manually)',
+      public: false,
+      files: { 'sened-license-status.json': { content: JSON.stringify(initial, null, 2) } }
+    });
+    if (!gist.id) return { ok: false, error: gist.message || 'فشل الإنشاء' };
+    const d = loadData();
+    d.settings.license.gistId = gist.id;
+    d.settings.license.gistToken = token;
+    saveData(d);
+    return { ok: true, gistId: gist.id };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
   if (d.settings.auth.username === username) {
@@ -406,6 +601,10 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   takeBackup();
+  checkLicenseStatus();
+  const d = loadData();
+  if (!d.settings.anthropicKey) warmUpOllama(d.settings.aiModel || 'qwen2:latest');
   setInterval(takeBackup, 60 * 60 * 1000); // نسخة احتياطية إضافية كل ساعة أثناء التشغيل
+  setInterval(checkLicenseStatus, 30 * 60 * 1000); // تحقق من حالة الترخيص كل نصف ساعة
 });
 app.on('window-all-closed', () => { tgBots.forEach(b => { b.running = false; }); app.quit(); });

@@ -16,5 +16,9 @@ contextBridge.exposeInMainWorld('sened', {
   onAiReset: (cb) => ipcRenderer.on('ai:reset', () => cb()),
   authVerify: (username, password) => ipcRenderer.invoke('auth:verify', { username, password }),
   authSetCredentials: (username, password) => ipcRenderer.invoke('auth:setCredentials', { username, password }),
-  authHashPassword: (password) => ipcRenderer.invoke('auth:hashPassword', password)
+  authHashPassword: (password) => ipcRenderer.invoke('auth:hashPassword', password),
+  licenseCheckNow: () => ipcRenderer.invoke('license:checkNow'),
+  licenseRegenClaimCode: () => ipcRenderer.invoke('license:regenClaimCode'),
+  licenseCreateGist: (token) => ipcRenderer.invoke('license:createGist', token),
+  onLicenseStatus: (cb) => ipcRenderer.on('license:status', (e, s) => cb(s))
 });

@@ -18,13 +18,17 @@ const bridge = window.sened || {
       auth: { enabled: false, username: 'admin', passwordHash: '' },
       company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
       notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
-      expenseBudgets: {}, onboardingDismissed: false, currencies: []
+      expenseBudgets: {}, onboardingDismissed: false, currencies: [],
+      invoice: { template: 'classic', color: '#C8A45C' },
+      expenseCategoryList: ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'],
+      productCategoryList: [],
+      license: { deviceId: 'browser-preview', gistId: '', gistToken: '', ownerChatId: '', claimCode: '', locked: false, message: '', lastCheck: '' }
     },
-    products: [], customers: [], invoices: [], expenses: [],
+    products: [], customers: [], invoices: [], expenses: [], quotes: [],
     purchases: [], suppliers: [], employees: [], shareholders: [], withdrawals: [],
     wallets: [], walletTx: [],
     auditLog: [], trash: [], returns: [],
-    counters: { invoice: 1, purchase: 1 }
+    counters: { invoice: 1, purchase: 1, quote: 1 }
   },
   saveData: async d => localStorage.setItem('sened', JSON.stringify(d)),
   askAI: async () => ({ ok: false, error: 'BROWSER' }),
@@ -39,7 +43,11 @@ const bridge = window.sened || {
   onAiReset: () => {},
   authVerify: async () => ({ role: 'manager', name: 'admin' }),
   authSetCredentials: async () => true,
-  authHashPassword: async (p) => ({ salt: 'browser', hash: p })
+  authHashPassword: async (p) => ({ salt: 'browser', hash: p }),
+  licenseCheckNow: async () => true,
+  licenseRegenClaimCode: async () => 'BROWSER',
+  licenseCreateGist: async () => ({ ok: false, error: 'BROWSER' }),
+  onLicenseStatus: () => {}
 };
 
 // ---------- الترجمة ----------
@@ -51,6 +59,17 @@ function applyLang() {
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = T[el.dataset.i18nPh] || ''; });
   $('brandName').textContent = DB.settings.businessName || T.appName;
   applyThemeLabel();
+  document.querySelectorAll('.lang-switch button').forEach(b => b.classList.toggle('active', b.dataset.lang === DB.settings.lang));
+}
+
+async function switchLanguage(lang) {
+  if (DB.settings.lang === lang) return;
+  DB.settings.lang = lang;
+  await persist();
+  applyLang();
+  if ($('setLang')) $('setLang').value = lang;
+  renderAll();
+  checkAI();
 }
 
 // ---------- المظهر (ليلي/نهاري) ----------
@@ -80,8 +99,8 @@ function toast(msg) {
 let currentRole = 'manager', currentUserName = 'admin';
 const PERMS = {
   manager: null, // null = كل الصفحات
-  accountant: ['dashboard', 'invoices', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant'],
-  cashier: ['dashboard', 'invoices', 'products', 'customers']
+  accountant: ['dashboard', 'invoices', 'quotations', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant'],
+  cashier: ['dashboard', 'invoices', 'quotations', 'products', 'customers']
 };
 
 function applyPermissions() {
@@ -190,6 +209,7 @@ let cmdkItems = [], cmdkActive = 0;
 function cmdkActionList() {
   const all = [
     { page: 'invoices', icon: '▤', label: T.newInvoice, action: () => { closeCmdk(); openInvoiceModal(); } },
+    { page: 'quotations', icon: '◧', label: T.newQuotation, action: () => { closeCmdk(); goPage('quotations'); openQuoteModal(); } },
     { page: 'purchases', icon: '⇩', label: T.newPurchase, action: () => { closeCmdk(); goPage('purchases'); openPurchaseModal(); } },
     { page: 'products', icon: '▣', label: T.addProduct, action: () => { closeCmdk(); goPage('products'); openProductModal(); } },
     { page: 'customers', icon: '◉', label: T.addCustomer, action: () => { closeCmdk(); goPage('customers'); openCustomerModal(); } },
@@ -367,12 +387,14 @@ function openCalculator() {
     <input id="calcDisplay" readonly style="font-size:1.8rem;text-align:end;font-family:monospace;margin-bottom:14px" value="0">
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
       ${['7','8','9','÷','4','5','6','×','1','2','3','−','0','.','=','+'].map(k => `<button class="btn ${'+−×÷='.includes(k) ? 'btn-gold' : 'btn-ghost'}" onclick="calcPress('${k}')">${k}</button>`).join('')}
-      <button class="btn btn-danger" style="grid-column:span 4" onclick="calcPress('C')">C</button>
+      <button class="btn btn-ghost" style="grid-column:span 2" onclick="calcPress('BACK')">⌫</button>
+      <button class="btn btn-danger" style="grid-column:span 2" onclick="calcPress('C')">C</button>
     </div>`);
 }
 let calcExpr = '';
 function calcPress(k) {
   if (k === 'C') { calcExpr = ''; }
+  else if (k === 'BACK') { calcExpr = calcExpr.slice(0, -1); }
   else if (k === '=') {
     try { calcExpr = String(Function('"use strict";return (' + calcExpr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-') + ')')()); }
     catch (e) { calcExpr = ''; }
@@ -492,14 +514,19 @@ function renderDashboard() {
   const f = financials();
   const low = DB.products.filter(isLow).length;
   const expiring = DB.products.filter(isExpiringSoon).length;
-  $('dashCards').innerHTML = `
-    <div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value" data-val="${todaySales}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value" data-val="${f.custDebt}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value" data-val="${f.totalWalletBalance}">0</div><div class="c-sub">${cur()}</div></div>
-    <div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value" data-val="${low}">0</div></div>
-    ${expiring ? `<div class="card"><div class="c-label">${T.expiringSoon}</div><div class="c-value" data-val="${expiring}">0</div></div>` : ''}`;
+  const isCashier = currentRole === 'cashier';
+  const cards = [
+    `<div class="card"><div class="c-label">${T.todaySales}</div><div class="c-value" data-val="${todaySales}">0</div><div class="c-sub">${cur()}</div></div>`,
+    `<div class="card"><div class="c-label">${T.totalSales}</div><div class="c-value" data-val="${f.totalSales}">0</div><div class="c-sub">${cur()}</div></div>`
+  ];
+  if (!isCashier) {
+    cards.push(`<div class="card emerald"><div class="c-label">${T.netProfit}</div><div class="c-value" data-val="${f.netProfit}">0</div><div class="c-sub">${cur()}</div></div>`);
+    cards.push(`<div class="card"><div class="c-label">${T.customerDebts}</div><div class="c-value" data-val="${f.custDebt}">0</div><div class="c-sub">${cur()}</div></div>`);
+    cards.push(`<div class="card"><div class="c-label">${T.totalBalance}</div><div class="c-value" data-val="${f.totalWalletBalance}">0</div><div class="c-sub">${cur()}</div></div>`);
+  }
+  cards.push(`<div class="card ${low ? '' : 'emerald'}"><div class="c-label">${T.lowStock}</div><div class="c-value" data-val="${low}">0</div></div>`);
+  if (expiring) cards.push(`<div class="card"><div class="c-label">${T.expiringSoon}</div><div class="c-value" data-val="${expiring}">0</div></div>`);
+  $('dashCards').innerHTML = cards.join('');
   animateCounters('dashCards');
   checkLowStockNotif();
   const rows = DB.invoices.slice(-6).reverse();
@@ -536,7 +563,9 @@ function openProductModal(id) {
   openModal(`<h3>${id ? T.editProduct : T.addProduct}</h3>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(p.name)}"></div>
     <div class="grid2">
-      <div class="field"><label>${T.category}</label><input id="mCat" value="${esc(p.category)}"></div>
+      <div class="field"><label>${T.category}</label><input id="mCat" value="${esc(p.category)}" list="mCatList">
+        <datalist id="mCatList">${(DB.settings.productCategoryList || []).map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      </div>
       <div class="field"><label>${T.stock}</label><input id="mStock" type="number" min="0" value="${p.stock}"></div>
       <div class="field"><label>${T.price}</label><input id="mPrice" type="number" min="0" value="${p.price}" oninput="updateMarginHint()"></div>
       <div class="field"><label>${T.cost}</label><input id="mCost" type="number" min="0" value="${p.cost}" oninput="updateMarginHint()"></div>
@@ -571,6 +600,10 @@ function updateMarginHint() {
 async function saveProduct(id) {
   const obj = { name: $('mName').value.trim(), category: $('mCat').value.trim(), price: Number($('mPrice').value || 0), cost: Number($('mCost').value || 0), stock: Number($('mStock').value || 0), threshold: Number($('mThreshold').value || 3), barcode: $('mBarcode').value.trim(), expiryDate: $('mExpiry').value, batchNo: $('mBatch').value.trim() };
   if (!obj.name) return;
+  if (obj.category) {
+    DB.settings.productCategoryList = DB.settings.productCategoryList || [];
+    if (!DB.settings.productCategoryList.includes(obj.category)) DB.settings.productCategoryList.push(obj.category);
+  }
   if (id) Object.assign(DB.products.find(x => x.id === id), obj);
   else DB.products.push({ id: uid('p'), ...obj });
   logAudit(id ? 'update' : 'create', T.products, obj.name);
@@ -672,8 +705,7 @@ function renderInvoices() {
       <td>${statusBadge(i.status)}</td><td>${i.date.slice(0, 10)}</td>
       <td>
         ${remaining > 0 ? `<button class="btn btn-ghost btn-sm" onclick="openCollectModal('invoice','${i.id}')">${T.collectPayment}</button>` : ''}
-        <button class="btn btn-ghost btn-sm" onclick="printInvoice('${i.id}')">${T.print}</button>
-        <button class="btn btn-ghost btn-sm" onclick="exportInvoicePdf('${i.id}')">${T.exportPdf}</button>
+        <button class="btn btn-ghost btn-sm" onclick="previewInvoice('${i.id}')">${T.preview}</button>
         <button class="btn btn-ghost btn-sm" onclick="openReturnModal('${i.id}')">${T.returnInvoice}</button>
         <button class="btn btn-danger btn-sm" onclick="delInvoice('${i.id}')">${T.delete}</button>
       </td>
@@ -832,37 +864,40 @@ async function processReturn(invoiceId) {
   await persist(); closeModal(); renderAll(); toast(T.returnDone);
 }
 
-function buildInvoiceHtml(inv) {
-  const remaining = Math.max(0, inv.total - (inv.paidAmount || 0));
+function buildInvoiceHtml(inv, kind) {
+  kind = kind || 'invoice';
+  const remaining = kind === 'invoice' ? Math.max(0, inv.total - (inv.paidAmount || 0)) : 0;
   const co = DB.settings.company || {};
-  const logo = co.logoDataUrl
-    ? `<img src="${co.logoDataUrl}" style="height:52px;object-fit:contain">`
-    : '';
+  const invSettings = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
+  const tpl = invSettings.template || 'classic';
+  const color = invSettings.color || '#C8A45C';
+  const logo = co.logoDataUrl ? `<img src="${co.logoDataUrl}" class="inv-logo">` : '';
   const infoLines = [co.address, co.phone, co.rc ? `${T.companyRC}: ${co.rc}` : '', co.taxId ? `${T.companyTaxId}: ${co.taxId}` : ''].filter(Boolean);
   const subtotal = inv.subtotal ?? inv.total;
   const discount = inv.discount || 0;
   const taxPercent = inv.taxPercent || 0;
+  const noLabel = kind === 'quote' ? T.quoteNo : T.invoiceNo;
   return `
-    <div class="inv-head">
-      <div>
+    <div class="inv-doc tpl-${tpl}" style="--inv-accent:${color}">
+      <div class="inv-head">
         ${logo}
         <div class="inv-brand">${esc(DB.settings.businessName || 'سند')}</div>
         ${infoLines.length ? `<div class="inv-company-info">${infoLines.map(esc).join('<br>')}</div>` : ''}
       </div>
-      <div class="inv-meta">${T.invoiceNo}: #${inv.number}<br>${T.date}: ${inv.date.slice(0, 10)}<br>${T.customer}: ${esc(inv.customerName) || T.walkIn}</div>
-    </div>
-    <table><thead><tr><th>${T.product}</th><th>${T.price}</th><th>${T.qty}</th><th>${T.total}</th></tr></thead>
-    <tbody>${inv.items.map(it => `<tr><td>${esc(it.name)}</td><td>${fmt(it.price)}</td><td>${it.qty}</td><td>${fmt(it.total)}</td></tr>`).join('')}</tbody></table>
-    <div class="inv-totals-box">
-      ${discount || taxPercent ? `<div class="inv-row"><span>${T.subtotal}</span><span>${fmt(subtotal)} ${cur()}</span></div>` : ''}
-      ${discount ? `<div class="inv-row"><span>${T.discount}</span><span>-${fmt(discount)} ${cur()}</span></div>` : ''}
-      ${taxPercent ? `<div class="inv-row"><span>${T.taxPercent}</span><span>${fmt(taxPercent)}%</span></div>` : ''}
-      <div class="inv-total">${T.grandTotal}: ${fmt(inv.total)} ${cur()}</div>
-      ${remaining > 0 ? `<div class="inv-total" style="color:#c0504d">${T.remaining}: ${fmt(remaining)} ${cur()}</div>` : ''}
-    </div>
-    ${co.notes ? `<div class="inv-company-info" style="margin-top:10px">${esc(co.notes)}</div>` : ''}
-    <div class="inv-thanks">${T.thanks} ✦ ${esc(DB.settings.businessName || 'سند')}</div>
-    <div class="inv-dev-credit">${T.developerCredit}</div>`;
+      <div class="inv-meta"><span>${noLabel}: #${inv.number}</span><span>${T.date}: ${inv.date.slice(0, 10)}</span><span>${T.customer}: ${esc(inv.customerName) || T.walkIn}</span></div>
+      <table><thead><tr><th>${T.product}</th><th>${T.price}</th><th>${T.qty}</th><th>${T.total}</th></tr></thead>
+      <tbody>${inv.items.map(it => `<tr><td>${esc(it.name)}</td><td>${fmt(it.price)}</td><td>${it.qty}</td><td>${fmt(it.total)}</td></tr>`).join('')}</tbody></table>
+      <div class="inv-totals-box">
+        ${discount || taxPercent ? `<div class="inv-row"><span>${T.subtotal}</span><span>${fmt(subtotal)} ${cur()}</span></div>` : ''}
+        ${discount ? `<div class="inv-row"><span>${T.discount}</span><span>-${fmt(discount)} ${cur()}</span></div>` : ''}
+        ${taxPercent ? `<div class="inv-row"><span>${T.taxPercent}</span><span>${fmt(taxPercent)}%</span></div>` : ''}
+        <div class="inv-total">${T.grandTotal}: ${fmt(inv.total)} ${cur()}</div>
+        ${remaining > 0 ? `<div class="inv-total inv-remaining">${T.remaining}: ${fmt(remaining)} ${cur()}</div>` : ''}
+      </div>
+      ${kind === 'quote' ? `<div class="inv-company-info" style="margin-top:10px;text-align:center">${T.quoteValidNote}</div>` : ''}
+      ${co.notes ? `<div class="inv-company-info" style="margin-top:10px">${esc(co.notes)}</div>` : ''}
+      <div class="inv-thanks">${T.thanks} ✦ ${esc(DB.settings.businessName || 'سند')}</div>
+    </div>`;
 }
 
 function printInvoice(id) {
@@ -879,6 +914,153 @@ async function exportInvoicePdf(id) {
   const res = await bridge.exportPdf(`فاتورة-${inv.number}.pdf`);
   if (res.ok) toast(T.pdfExported);
   else if (!res.canceled) toast('⚠️ ' + (res.error || T.aiOffline));
+}
+
+function previewInvoice(id, kind) {
+  kind = kind || 'invoice';
+  const list = kind === 'quote' ? DB.quotes : DB.invoices;
+  const doc = (list || []).find(x => x.id === id);
+  if (!doc) return;
+  const printFn = kind === 'quote' ? 'printQuote' : 'printInvoice';
+  const pdfFn = kind === 'quote' ? 'exportQuotePdf' : 'exportInvoicePdf';
+  openModal(`<div class="inv-preview-modal">${buildInvoiceHtml(doc, kind)}</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-ghost" onclick="${printFn}('${id}')">${T.print}</button>
+      <button class="btn btn-gold" onclick="${pdfFn}('${id}')">${T.savePdf}</button>
+    </div>`);
+}
+
+// ---------- عروض الأسعار (لا تؤثر على المخزون ولا تُحتسب كبيع) ----------
+function renderQuotes() {
+  const rows = (DB.quotes || []).slice().reverse();
+  const el = $('quoteTable');
+  if (!el) return;
+  el.innerHTML = `<thead><tr><th>${T.quoteNo}</th><th>${T.customer}</th><th>${T.total}</th><th>${T.date}</th><th>${T.actions}</th></tr></thead><tbody>` +
+    (rows.length ? rows.map(q => `<tr>
+      <td>#${q.number}</td><td>${esc(q.customerName) || T.walkIn}</td>
+      <td><span class="badge">${fmt(q.total)} ${cur()}</span></td><td>${q.date.slice(0, 10)}</td>
+      <td>
+        <button class="btn btn-ghost btn-sm" onclick="previewInvoice('${q.id}','quote')">${T.preview}</button>
+        <button class="btn btn-ghost btn-sm" onclick="convertQuoteToInvoice('${q.id}')">${T.convertToInvoice}</button>
+        <button class="btn btn-danger btn-sm" onclick="delQuote('${q.id}')">${T.delete}</button>
+      </td>
+    </tr>`).join('') : `<tr><td colspan="5" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+}
+
+let quoteLines = [];
+function openQuoteModal() {
+  if (!DB.products.length) { toast(T.noData + ' — ' + T.addProduct); return; }
+  quoteLines = [{ productId: DB.products[0].id, qty: 1 }];
+  openModal(`<h3>${T.newQuotation} #${DB.counters.quote}</h3>
+    <div class="field"><label>${T.customer}</label>
+      <select id="mQCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+    </div>
+    <div id="quoteLinesBox"></div>
+    <button class="btn btn-ghost btn-sm" onclick="addQuoteLine()">+ ${T.addLine}</button>
+    <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="quoteSubtotal">0</span> ${cur()}</p>
+    <div class="grid2">
+      <div class="field"><label>${T.discount}</label><input id="mQDiscount" type="number" min="0" placeholder="0" oninput="drawQuoteLines()"></div>
+      <div class="field"><label>${T.taxPercent}</label><input id="mQTax" type="number" min="0" max="100" placeholder="0" oninput="drawQuoteLines()"></div>
+    </div>
+    <h3>${T.grandTotal}: <span id="quoteTotal">0</span> ${cur()}</h3>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveQuote()">${T.saveInvoice}</button>
+    </div>`);
+  drawQuoteLines();
+}
+
+function drawQuoteLines() {
+  $('quoteLinesBox').innerHTML = quoteLines.map((l, ix) => `
+    <div class="grid3" style="margin-bottom:8px">
+      <select onchange="quoteLines[${ix}].productId=this.value;drawQuoteLines()">
+        ${DB.products.map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)} — ${fmt(p.price)}</option>`).join('')}
+      </select>
+      <input type="number" min="1" value="${l.qty}" onchange="quoteLines[${ix}].qty=Number(this.value)||1;drawQuoteLines()">
+      <button class="btn btn-danger btn-sm" onclick="quoteLines.splice(${ix},1);drawQuoteLines()">✕</button>
+    </div>`).join('');
+  $('quoteSubtotal').textContent = fmt(quoteSubtotal());
+  $('quoteTotal').textContent = fmt(quoteGrandTotal());
+}
+
+function quoteSubtotal() {
+  return quoteLines.reduce((s, l) => {
+    const p = DB.products.find(x => x.id === l.productId);
+    return s + (p ? p.price * l.qty : 0);
+  }, 0);
+}
+
+function quoteGrandTotal() {
+  const discount = Math.max(0, Number(($('mQDiscount') || {}).value || 0));
+  const taxPct = Math.max(0, Number(($('mQTax') || {}).value || 0));
+  const afterDiscount = Math.max(0, quoteSubtotal() - discount);
+  return afterDiscount * (1 + taxPct / 100);
+}
+
+function addQuoteLine() { quoteLines.push({ productId: DB.products[0].id, qty: 1 }); drawQuoteLines(); }
+
+async function saveQuote() {
+  if (!quoteLines.length) return;
+  const custId = $('mQCust').value;
+  const cust = DB.customers.find(c => c.id === custId);
+  const items = quoteLines.map(l => {
+    const p = DB.products.find(x => x.id === l.productId);
+    return { name: p.name, price: p.price, cost: p.cost, qty: l.qty, total: p.price * l.qty };
+  });
+  const subtotal = quoteSubtotal();
+  const discount = Math.max(0, Number($('mQDiscount').value || 0));
+  const taxPercent = Math.max(0, Number($('mQTax').value || 0));
+  const total = quoteGrandTotal();
+  DB.quotes = DB.quotes || [];
+  const quoteNumber = DB.counters.quote++;
+  DB.quotes.push({
+    id: uid('q'), number: quoteNumber,
+    customerId: custId, customerName: cust ? cust.name : '',
+    items, subtotal, discount, taxPercent, total, date: new Date().toISOString()
+  });
+  logAudit('create', T.quotation, `#${quoteNumber}`);
+  await persist(); closeModal(); renderAll(); toast(T.saved);
+}
+
+async function delQuote(id) { await softDelete('quotes', id, T.quotation); }
+
+function printQuote(id) {
+  const q = (DB.quotes || []).find(x => x.id === id);
+  if (!q) return;
+  $('print-area').innerHTML = buildInvoiceHtml(q, 'quote');
+  bridge.print();
+}
+
+async function exportQuotePdf(id) {
+  const q = (DB.quotes || []).find(x => x.id === id);
+  if (!q) return;
+  $('print-area').innerHTML = buildInvoiceHtml(q, 'quote');
+  const res = await bridge.exportPdf(`عرض-سعر-${q.number}.pdf`);
+  if (res.ok) toast(T.pdfExported);
+  else if (!res.canceled) toast('⚠️ ' + (res.error || T.aiOffline));
+}
+
+async function convertQuoteToInvoice(id) {
+  const q = (DB.quotes || []).find(x => x.id === id);
+  if (!q) return;
+  for (const it of q.items) {
+    const p = DB.products.find(x => x.name === it.name);
+    if (p && it.qty > Number(p.stock)) { toast(`${T.stockError}: ${it.name}`); return; }
+  }
+  q.items.forEach(it => {
+    const p = DB.products.find(x => x.name === it.name);
+    if (p) p.stock = Math.max(0, Number(p.stock) - it.qty);
+  });
+  const invNumber = DB.counters.invoice++;
+  DB.invoices.push({
+    id: uid('i'), number: invNumber,
+    customerId: q.customerId, customerName: q.customerName,
+    items: q.items, subtotal: q.subtotal, discount: q.discount, taxPercent: q.taxPercent,
+    total: q.total, paidAmount: 0, status: statusOf(q.total, 0), date: new Date().toISOString()
+  });
+  logAudit('create', T.invoices, `#${invNumber} (${T.convertToInvoice})`);
+  await persist(); renderAll(); toast(T.invoiceSaved);
 }
 
 // ---------- المشتريات ----------
@@ -1267,8 +1449,52 @@ async function saveWalletTx(walletId) {
 async function delWalletTx(id) { await softDelete('walletTx', id, T.transactions); }
 
 // ---------- المصاريف ----------
-const EXPENSE_CATEGORIES = ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'];
+function expenseCategoryList() {
+  if (!DB.settings.expenseCategoryList || !DB.settings.expenseCategoryList.length) {
+    DB.settings.expenseCategoryList = ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'];
+  }
+  return DB.settings.expenseCategoryList;
+}
 function catLabel(cat) { return T['cat' + (cat || 'other').charAt(0).toUpperCase() + (cat || 'other').slice(1)] || cat || T.catOther; }
+
+function categorySelectHtml(id) {
+  const list = expenseCategoryList();
+  return `<select id="${id}" onchange="handleCategorySelectChange('${id}')">
+    ${list.map(c => `<option value="${c}">${catLabel(c)}</option>`).join('')}
+    <option value="__new__">+ ${T.addCategory}</option>
+  </select>
+  <div id="${id}_newRow" class="hidden grid3" style="margin-top:8px">
+    <input id="${id}_newInput" placeholder="${T.newCategoryName}">
+    <button type="button" class="btn btn-gold btn-sm" onclick="confirmNewCategory('${id}')">${T.save}</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="cancelNewCategory('${id}')">${T.cancel}</button>
+  </div>`;
+}
+
+// إضافة فئة جديدة تتم داخل نفس النافذة المنبثقة (بدون فتح نافذة أخرى فتفقد بيانات النموذج الحالي)
+function handleCategorySelectChange(selectId) {
+  const sel = $(selectId);
+  if (sel && sel.value === '__new__') {
+    $(selectId + '_newRow').classList.remove('hidden');
+    $(selectId + '_newInput').focus();
+  }
+}
+
+function cancelNewCategory(selectId) {
+  $(selectId).value = expenseCategoryList()[0];
+  $(selectId + '_newRow').classList.add('hidden');
+}
+
+async function confirmNewCategory(selectId) {
+  const name = $(selectId + '_newInput').value.trim();
+  if (!name) return;
+  const list = expenseCategoryList();
+  if (!list.includes(name)) list.push(name);
+  await persist();
+  const sel = $(selectId);
+  sel.innerHTML = list.map(c => `<option value="${c}">${catLabel(c)}</option>`).join('') + `<option value="__new__">+ ${T.addCategory}</option>`;
+  sel.value = name;
+  $(selectId + '_newRow').classList.add('hidden');
+}
 
 function renderExpenses() {
   const rows = DB.expenses.slice().reverse();
@@ -1284,7 +1510,7 @@ function renderExpenses() {
   const thisMonth = new Date().toISOString().slice(0, 7);
   const spentByCat = {};
   DB.expenses.filter(e => e.date.slice(0, 7) === thisMonth).forEach(e => { spentByCat[e.category || 'other'] = (spentByCat[e.category || 'other'] || 0) + Number(e.amount); });
-  const withBudget = EXPENSE_CATEGORIES.filter(c => budgets[c] > 0);
+  const withBudget = expenseCategoryList().filter(c => budgets[c] > 0);
   const el = $('budgetCards');
   if (el) {
     el.innerHTML = withBudget.length ? withBudget.map(c => {
@@ -1301,7 +1527,7 @@ function openExpenseModal() {
     <div class="grid2">
       <div class="field"><label>${T.originalAmount}</label><input id="mAmount" type="number" min="0" oninput="updateExpensePreview()"></div>
       <div class="field"><label>${T.expenseCategory}</label>
-        <select id="mCategory">${EXPENSE_CATEGORIES.map(c => `<option value="${c}">${catLabel(c)}</option>`).join('')}</select>
+        ${categorySelectHtml('mCategory')}
       </div>
     </div>
     ${currencies.length ? `
@@ -1408,22 +1634,25 @@ async function exportReportPdf() {
   const tally = {};
   DB.invoices.forEach(i => i.items.forEach(it => { tally[it.name] = (tally[it.name] || 0) + it.qty; }));
   const top = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const invSettings = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
   $('print-area').innerHTML = `
-    <div class="inv-head">
-      <div class="inv-brand">${esc(DB.settings.businessName || 'سند')} — ${T.reports}</div>
-      <div class="inv-meta">${T.date}: ${new Date().toISOString().slice(0, 10)}</div>
-    </div>
-    <table><tbody>
-      <tr><td>${T.totalSales}</td><td>${fmt(f.totalSales)} ${cur()}</td></tr>
-      <tr><td>${T.cogs}</td><td>${fmt(f.totalCogs)} ${cur()}</td></tr>
-      <tr><td>${T.grossProfit}</td><td>${fmt(f.grossProfit)} ${cur()}</td></tr>
-      <tr><td>${T.expenses}</td><td>${fmt(f.totalExpenses)} ${cur()}</td></tr>
-      <tr><td><b>${T.netProfit}</b></td><td><b>${fmt(f.netProfit)} ${cur()}</b></td></tr>
-    </tbody></table>
-    <h3 style="margin:16px 0 8px">${T.topProducts}</h3>
-    <table><thead><tr><th>${T.product}</th><th>${T.qty}</th></tr></thead>
-    <tbody>${top.length ? top.map(([name, q]) => `<tr><td>${esc(name)}</td><td>${q}</td></tr>`).join('') : `<tr><td colspan="2">${T.noData}</td></tr>`}</tbody></table>
-    <div class="inv-dev-credit" style="margin-top:20px">${T.developerCredit}</div>`;
+    <div class="inv-doc tpl-${invSettings.template || 'classic'}" style="--inv-accent:${invSettings.color || '#C8A45C'}">
+      <div class="inv-head">
+        <div class="inv-brand">${esc(DB.settings.businessName || 'سند')} — ${T.reports}</div>
+        <div class="inv-company-info">${T.date}: ${new Date().toISOString().slice(0, 10)}</div>
+      </div>
+      <table><tbody>
+        <tr><td>${T.totalSales}</td><td>${fmt(f.totalSales)} ${cur()}</td></tr>
+        <tr><td>${T.cogs}</td><td>${fmt(f.totalCogs)} ${cur()}</td></tr>
+        <tr><td>${T.grossProfit}</td><td>${fmt(f.grossProfit)} ${cur()}</td></tr>
+        <tr><td>${T.expenses}</td><td>${fmt(f.totalExpenses)} ${cur()}</td></tr>
+        <tr><td><b>${T.netProfit}</b></td><td><b>${fmt(f.netProfit)} ${cur()}</b></td></tr>
+      </tbody></table>
+      <h3 style="margin:16px 0 8px;color:var(--inv-accent)">${T.topProducts}</h3>
+      <table><thead><tr><th>${T.product}</th><th>${T.qty}</th></tr></thead>
+      <tbody>${top.length ? top.map(([name, q]) => `<tr><td>${esc(name)}</td><td>${q}</td></tr>`).join('') : `<tr><td colspan="2">${T.noData}</td></tr>`}</tbody></table>
+      <div class="inv-thanks">${esc(DB.settings.businessName || 'سند')}</div>
+    </div>`;
   const res = await bridge.exportPdf(`تقرير-${new Date().toISOString().slice(0, 10)}.pdf`);
   if (res.ok) toast(T.pdfExported);
   else if (!res.canceled) toast('⚠️ ' + (res.error || T.aiOffline));
@@ -1592,6 +1821,93 @@ function fillSettings() {
   $('setNotifWeekly').checked = nf.weeklyReport !== false;
   fillBudgetInputs();
   renderCurrenciesList();
+  fillLicensePanel();
+  const iv = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
+  $('setInvTemplate').value = iv.template || 'classic';
+  $('setInvColor').value = iv.color || '#C8A45C';
+  updateInvoiceDesignPreview();
+}
+
+function sampleInvoiceForPreview() {
+  return {
+    number: 1024, date: new Date().toISOString(), customerName: T.walkIn,
+    items: [
+      { name: T.product + ' 1', price: 500, qty: 2, total: 1000 },
+      { name: T.product + ' 2', price: 300, qty: 1, total: 300 }
+    ],
+    subtotal: 1300, discount: 100, taxPercent: 5, total: 1260, paidAmount: 1260
+  };
+}
+
+function updateInvoiceDesignPreview() {
+  const el = $('invDesignPreview');
+  if (!el) return;
+  const prevSettings = DB.settings.invoice;
+  DB.settings.invoice = { template: $('setInvTemplate').value, color: $('setInvColor').value };
+  el.innerHTML = `<div class="inv-preview-modal" style="max-height:340px">${buildInvoiceHtml(sampleInvoiceForPreview())}</div>`;
+  DB.settings.invoice = prevSettings;
+}
+
+async function saveInvoiceDesign() {
+  DB.settings.invoice = { template: $('setInvTemplate').value, color: $('setInvColor').value };
+  await persist();
+  toast(T.saved);
+}
+
+function fillLicensePanel() {
+  const lic = DB.settings.license || {};
+  if ($('licDeviceId')) $('licDeviceId').value = lic.deviceId || '';
+  if (!$('licAdminActive')) return;
+  if (lic.gistId) {
+    $('licAdminSetup').classList.add('hidden');
+    $('licAdminActive').classList.remove('hidden');
+    $('licGistIdLabel').textContent = `${T.licenseSystemActive} ${lic.gistId}`;
+    $('licClaimCode').textContent = lic.ownerChatId ? '••••••••' : (lic.claimCode || '');
+  } else {
+    $('licAdminSetup').classList.remove('hidden');
+    $('licAdminActive').classList.add('hidden');
+  }
+}
+
+function copyDeviceId() {
+  const id = DB.settings.license && DB.settings.license.deviceId;
+  if (!id) return;
+  navigator.clipboard.writeText(id).then(() => toast(T.copied));
+}
+
+async function createLicenseSystem() {
+  const token = $('licGithubToken').value.trim();
+  if (!token) return;
+  const res = await bridge.licenseCreateGist(token);
+  if (res.ok) {
+    DB = await bridge.loadData();
+    fillLicensePanel();
+    toast(T.saved);
+  } else {
+    toast('⚠️ ' + (res.error || ''));
+  }
+}
+
+async function regenClaimCode() {
+  const code = await bridge.licenseRegenClaimCode();
+  DB = await bridge.loadData();
+  fillLicensePanel();
+  toast(code);
+}
+
+async function licenseCheckNowUi() {
+  await bridge.licenseCheckNow();
+  DB = await bridge.loadData();
+  toast(T.checkNow + ' ✓');
+}
+
+function applyLicenseLock(locked, message) {
+  if (locked) {
+    $('licenseLockMsg').textContent = message || T.lockedBody;
+    $('licenseLockScreen').classList.add('open');
+  } else {
+    $('licenseLockScreen').classList.remove('open');
+  }
 }
 
 function renderCurrenciesList() {
@@ -1622,14 +1938,14 @@ async function delCurrency(ix) {
 
 function fillBudgetInputs() {
   const budgets = DB.settings.expenseBudgets || {};
-  $('budgetInputs').innerHTML = EXPENSE_CATEGORIES.map(c => `
-    <div class="field"><label>${catLabel(c)}</label><input type="number" min="0" placeholder="0" id="mBudget_${c}" value="${budgets[c] || ''}"></div>
+  $('budgetInputs').innerHTML = expenseCategoryList().map(c => `
+    <div class="field"><label>${catLabel(c)}</label><input type="number" min="0" placeholder="0" id="mBudget_${esc(c)}" value="${budgets[c] || ''}"></div>
   `).join('');
 }
 
 async function saveBudgets() {
   DB.settings.expenseBudgets = {};
-  EXPENSE_CATEGORIES.forEach(c => {
+  expenseCategoryList().forEach(c => {
     const v = Number(($('mBudget_' + c) || {}).value || 0);
     if (v > 0) DB.settings.expenseBudgets[c] = v;
   });
@@ -1816,7 +2132,7 @@ function initParticles() {
 // ---------- التشغيل ----------
 function renderAll() {
   renderDashboard(); renderProducts(); renderCustomers(); renderSuppliers();
-  renderInvoices(); renderPurchases(); renderDebts(); renderEmployees();
+  renderInvoices(); renderQuotes(); renderPurchases(); renderDebts(); renderEmployees();
   renderShareholders(); renderWallets(); renderExpenses(); renderReports();
   renderAuditLog(); renderTrash(); renderTelegramBots();
 }
@@ -1842,6 +2158,11 @@ async function startApp() {
   applyTheme();
   fillSettings();
   initParticles();
+
+  // نظام الترخيص: نطبّق آخر حالة معروفة فوراً، ثم نستمع لأي تحديث حي من العملية الرئيسية
+  bridge.onLicenseStatus(s => applyLicenseLock(s.locked, s.message));
+  const lic = DB.settings.license || {};
+  if (lic.locked) applyLicenseLock(true, lic.message);
 
   if (DB.settings.auth && DB.settings.auth.enabled) {
     $('loginUser').value = DB.settings.auth.username || '';

@@ -44,6 +44,16 @@
     </div>
   </div>
 
+  <!-- شاشة قفل الترخيص عن بُعد -->
+  <div class="auth-screen" id="licenseLockScreen">
+    <div class="auth-card">
+      <img class="auth-logo" src="../assets/logo.png" alt="سند">
+      <h2 data-i18n="lockedTitle"></h2>
+      <p class="muted" id="licenseLockMsg" data-i18n="lockedBody"></p>
+      <button class="btn btn-gold" style="width:100%;justify-content:center;margin-top:16px" onclick="exportData()" data-i18n="exportMyData"></button>
+    </div>
+  </div>
+
   <div class="app hidden" id="appShell">
     <!-- الشريط الجانبي -->
     <aside class="sidebar">
@@ -54,9 +64,15 @@
           <div class="brand-tag" data-i18n="tagline"></div>
         </div>
       </div>
+      <div class="lang-switch" id="langSwitch">
+        <button data-lang="ar" onclick="switchLanguage('ar')">AR</button>
+        <button data-lang="fr" onclick="switchLanguage('fr')">FR</button>
+        <button data-lang="en" onclick="switchLanguage('en')">EN</button>
+      </div>
       <nav class="nav-scroll">
         <div class="nav-item active" data-page="dashboard"><span class="ic">◈</span><span data-i18n="dashboard"></span></div>
         <div class="nav-item" data-page="invoices"><span class="ic">▤</span><span data-i18n="invoices"></span></div>
+        <div class="nav-item" data-page="quotations"><span class="ic">◧</span><span data-i18n="quotation"></span></div>
         <div class="nav-item" data-page="purchases"><span class="ic">⇩</span><span data-i18n="purchases"></span></div>
         <div class="nav-item" data-page="products"><span class="ic">▣</span><span data-i18n="products"></span></div>
         <div class="nav-item" data-page="customers"><span class="ic">◉</span><span data-i18n="customers"></span></div>
@@ -106,6 +122,15 @@
           </div>
         </div>
         <div class="tbl-wrap"><table id="invTable"></table></div>
+      </section>
+
+      <!-- عروض الأسعار -->
+      <section class="page" id="page-quotations">
+        <div class="page-head">
+          <h2 class="page-title" data-i18n="quotation"></h2>
+          <button class="btn btn-gold" onclick="openQuoteModal()">+ <span data-i18n="newQuotation"></span></button>
+        </div>
+        <div class="tbl-wrap"><table id="quoteTable"></table></div>
       </section>
 
       <!-- المشتريات -->
@@ -288,6 +313,22 @@
           <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
         </div>
         <div class="panel">
+          <h3 data-i18n="invoiceDesign"></h3>
+          <div class="grid2">
+            <div class="field"><label data-i18n="invoiceTemplate"></label>
+              <select id="setInvTemplate" onchange="updateInvoiceDesignPreview()">
+                <option value="classic" data-i18n="tplClassic"></option>
+                <option value="modern" data-i18n="tplModern"></option>
+                <option value="minimal" data-i18n="tplMinimal"></option>
+                <option value="bold" data-i18n="tplBold"></option>
+              </select>
+            </div>
+            <div class="field"><label data-i18n="invoiceColor"></label><input id="setInvColor" type="color" style="height:44px;padding:4px" oninput="updateInvoiceDesignPreview()"></div>
+          </div>
+          <button class="btn btn-gold" onclick="saveInvoiceDesign()" data-i18n="save"></button>
+          <div id="invDesignPreview" style="margin-top:16px"></div>
+        </div>
+        <div class="panel">
           <h3 data-i18n="currencies"></h3>
           <div id="currenciesList"></div>
           <div class="grid3" style="margin-top:10px">
@@ -320,6 +361,38 @@
             <div class="field"><label data-i18n="newPassword"></label><input id="setNewPass" type="password" placeholder="••••••••"></div>
           </div>
           <button class="btn btn-gold" onclick="saveSecurity()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
+          <h3 data-i18n="licenseTitle"></h3>
+          <div class="field">
+            <label data-i18n="deviceId"></label>
+            <div style="display:flex;gap:8px">
+              <input id="licDeviceId" readonly>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="copyDeviceId()" data-i18n="copy"></button>
+            </div>
+            <p class="muted" data-i18n="licenseHelpCustomer" style="margin-top:6px"></p>
+          </div>
+          <details>
+            <summary style="cursor:pointer;color:var(--gold);font-weight:800;padding:8px 0" data-i18n="adminSection"></summary>
+            <p class="muted" style="color:#e08886" data-i18n="adminWarning"></p>
+            <div id="licAdminSetup">
+              <div class="field" style="margin-top:10px"><label data-i18n="githubToken"></label><input id="licGithubToken" type="password" placeholder="ghp_..."></div>
+              <button type="button" class="btn btn-gold btn-sm" onclick="createLicenseSystem()" data-i18n="createLicenseSystem"></button>
+            </div>
+            <div id="licAdminActive" class="hidden">
+              <p class="muted" id="licGistIdLabel"></p>
+              <div class="field" style="margin-top:10px">
+                <label data-i18n="claimCode"></label>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <code id="licClaimCode" style="background:var(--dark-tertiary);padding:8px 14px;border-radius:8px;font-size:1.1rem;letter-spacing:2px"></code>
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="regenClaimCode()" data-i18n="regenClaimCode"></button>
+                </div>
+                <p class="muted" style="margin-top:6px" data-i18n="claimInstructions"></p>
+              </div>
+              <p class="muted" data-i18n="adminCommandsHelp" style="margin-top:10px"></p>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="licenseCheckNowUi()" data-i18n="checkNow"></button>
+          </details>
         </div>
         <div class="panel">
           <h3 data-i18n="dataSection"></h3>
