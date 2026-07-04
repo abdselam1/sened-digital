@@ -44,6 +44,18 @@
     </div>
   </div>
 
+  <!-- شاشة تفعيل المطوّر (كود مرة واحدة لكل جهاز) -->
+  <div class="auth-screen" id="activationScreen">
+    <div class="auth-card">
+      <img class="auth-logo" src="../assets/logo.png" alt="سند">
+      <h2 data-i18n="activationTitle"></h2>
+      <p class="muted" data-i18n="activationBody"></p>
+      <div class="field" style="margin-top:14px"><label data-i18n="activationCodeLabel"></label><input id="activationCodeInput" type="password" onkeydown="if(event.key==='Enter')doActivate()"></div>
+      <div class="auth-error" id="activationError"></div>
+      <button class="btn btn-gold" style="width:100%;justify-content:center" onclick="doActivate()" data-i18n="activate"></button>
+    </div>
+  </div>
+
   <!-- شاشة قفل الترخيص عن بُعد -->
   <div class="auth-screen" id="licenseLockScreen">
     <div class="auth-card">
@@ -285,12 +297,7 @@
             </div>
             <div class="field"><label data-i18n="currency"></label><input id="setCurrency"></div>
             <div class="field"><label data-i18n="businessName"></label><input id="setBiz"></div>
-            <div class="field"><label data-i18n="aiModel"></label>
-              <select id="setModelSelect" onchange="onModelSelectChange()"></select>
-              <input id="setModel" style="margin-top:8px;display:none" data-i18n-ph="customModel">
-            </div>
           </div>
-          <div class="field"><label data-i18n="anthropicKey"></label><input id="setKey" type="password" placeholder="sk-ant-..."></div>
           <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
         </div>
         <div class="panel">
@@ -364,10 +371,11 @@
           <button class="btn btn-gold" onclick="saveSecurity()" data-i18n="save"></button>
         </div>
         <div class="panel">
-          <h3 data-i18n="aiProviders"></h3>
+          <h3 data-i18n="assistant"></h3>
           <p class="muted" id="aiBuiltinStatus" style="margin-bottom:12px"></p>
-          <div id="aiProvidersList"></div>
-          <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="openAiProviderModal()">+ <span data-i18n="aiAddProvider"></span></button>
+          <div class="field"><label data-i18n="groqKeyOptional"></label><input id="setGroqKey" type="password" placeholder="gsk_..."></div>
+          <p class="muted" data-i18n="groqKeyHelp" style="margin-bottom:10px"></p>
+          <button class="btn btn-gold btn-sm" onclick="saveGroqKey()" data-i18n="save"></button>
         </div>
         <div class="panel">
           <h3 data-i18n="dataSection"></h3>
@@ -388,7 +396,7 @@
           <h3 data-i18n="auditLog"></h3>
           <div class="tbl-wrap"><table id="auditLogTable"></table></div>
         </div>
-        <p class="dev-credit" data-i18n="developerCredit"></p>
+        <p class="dev-credit dev-credit-link" onclick="bridge.openExternal('https://abdselam1.github.io/rim-medical/developer.html')" data-i18n="developerCredit"></p>
       </section>
 
       <!-- الإدارة (المطوّر فقط) -->
@@ -433,6 +441,18 @@
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn-gold btn-sm" onclick="saveSharedKey()" data-i18n="saveSharedKey"></button>
             <button class="btn btn-danger btn-sm" onclick="clearSharedKey()" data-i18n="clearSharedKey"></button>
+          </div>
+          <p class="muted" data-i18n="rebuildReminder" style="margin-top:10px;color:#e0b060"></p>
+        </div>
+
+        <div class="panel">
+          <h3 data-i18n="devActivationCode"></h3>
+          <p class="muted" data-i18n="devActivationHelp" style="margin-bottom:12px"></p>
+          <p class="muted" id="devActivationStatus" style="margin-bottom:10px"></p>
+          <div class="field"><label data-i18n="activationCodeLabel"></label><input id="devActivationInput" type="password"></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-gold btn-sm" onclick="saveDevActivationCode()" data-i18n="save"></button>
+            <button class="btn btn-danger btn-sm" onclick="clearDevActivationCode()" data-i18n="clearSharedKey"></button>
           </div>
           <p class="muted" data-i18n="rebuildReminder" style="margin-top:10px;color:#e0b060"></p>
         </div>

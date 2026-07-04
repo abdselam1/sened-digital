@@ -27,7 +27,8 @@
   },
   "devDependencies": {
     "electron": "^33.0.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "playwright": "^1.61.1"
   },
   "build": {
     "appId": "com.abdselam1.sened",

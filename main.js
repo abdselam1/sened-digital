@@ -8,28 +8,39 @@ const crypto = require('crypto');
 let win = null;
 const DATA_FILE = () => path.join(app.getPath('userData'), 'sened-data.json');
 
-// المفتاح المشترك المدمج: ملف builtin-ai.json يُشحن مع نسخة التطبيق الموزّعة (مُستثنى من المستودع العام عبر .gitignore)
-// — يجعل كل الزبائن يحصلون على الذكاء الاصطناعي بلا حساب أو تعاقد منهم. يُقرأ مرة واحدة.
-let BUILTIN_AI = null;
-function builtinAiProvider() {
-  if (BUILTIN_AI !== null) return BUILTIN_AI || null;
+// إعدادات مدمجة (builtin-ai.json) تُشحن مع نسخة التطبيق الموزّعة، مُستثناة من المستودع العام عبر .gitignore.
+// تحمل: مفتاح Groq المشترك (apiKey) + كود تفعيل المطوّر (activationCode). لا يُرفع أيٌّ منهما للمستودع العام.
+let BUILTIN_CFG = null;
+function readBuiltinConfig() {
+  if (BUILTIN_CFG) return BUILTIN_CFG;
   try {
     const p = path.join(__dirname, 'builtin-ai.json');
-    if (fs.existsSync(p)) {
-      const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (cfg && cfg.apiKey && cfg.baseUrl && cfg.model) {
-        BUILTIN_AI = { id: 'builtin', name: cfg.name || 'Sened AI', type: cfg.type || 'openai-compatible', baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, builtin: true };
-        return BUILTIN_AI;
-      }
-    }
+    if (fs.existsSync(p)) { BUILTIN_CFG = JSON.parse(fs.readFileSync(p, 'utf8')) || {}; return BUILTIN_CFG; }
   } catch (e) { /* تجاهل */ }
-  BUILTIN_AI = false;
+  BUILTIN_CFG = {};
+  return BUILTIN_CFG;
+}
+function writeBuiltinConfig(patch) {
+  const p = path.join(__dirname, 'builtin-ai.json');
+  const next = { ...readBuiltinConfig(), ...patch };
+  fs.writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+  BUILTIN_CFG = null; // أعد التحميل في المرة القادمة
+}
+function builtinAiProvider() {
+  const cfg = readBuiltinConfig();
+  if (cfg.apiKey) return { id: 'builtin', name: cfg.name || 'Sened AI', type: 'openai-compatible', baseUrl: cfg.baseUrl || 'https://api.groq.com/openai/v1', apiKey: cfg.apiKey, model: cfg.model || 'llama-3.3-70b-versatile', builtin: true };
   return null;
 }
-function writeBuiltinAi(cfg) {
-  const p = path.join(__dirname, 'builtin-ai.json');
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
-  BUILTIN_AI = null; // أعد التحميل في المرة القادمة
+function builtinActivationCode() { return readBuiltinConfig().activationCode || ''; }
+
+// بصمة الجهاز الفعلية (اسم الجهاز + عناوين الشبكة MAC) — ثابتة على نفس الجهاز، تتغيّر عند النقل لجهاز آخر.
+// تُستخدم لربط التفعيل بالجهاز: نسخ التطبيق لجهاز آخر يغيّر البصمة فيُطلب كود المطوّر من جديد.
+function machineFingerprint() {
+  const os = require('os');
+  const macs = Object.values(os.networkInterfaces()).flat()
+    .filter(i => i && !i.internal && i.mac && i.mac !== '00:00:00:00:00:00')
+    .map(i => i.mac).sort();
+  return crypto.createHash('sha256').update(os.hostname() + '|' + macs.join(',')).digest('hex');
 }
 
 // كلمة المرور تُخزَّن كـ sha256(ملح + كلمة المرور)؛ الملح يُولَّد عشوائياً لكل تنصيب.
@@ -43,8 +54,7 @@ const FRESH_AUTH_SALT = randomSalt();
 const DEFAULT_DATA = {
   settings: {
     lang: 'ar', businessName: 'سند', currency: 'MRU', telegramBots: [],
-    aiModel: 'qwen2:latest', anthropicKey: '', theme: 'dark',
-    aiProviders: [], activeProviderId: '',
+    groqKey: '', theme: 'dark',
     auth: { enabled: false, username: 'admin', salt: FRESH_AUTH_SALT, passwordHash: hashPass('admin123', FRESH_AUTH_SALT) },
     company: { address: '', rc: '', taxId: '', phone: '', notes: '', logoDataUrl: '' },
     notifications: { lowStock: true, weeklyReport: true, lastWeeklyNotif: '' },
@@ -52,6 +62,7 @@ const DEFAULT_DATA = {
     invoice: { template: 'classic', color: '#C8A45C' },
     expenseCategoryList: ['rent', 'salaries', 'utilities', 'transport', 'maintenance', 'marketing', 'other'],
     productCategoryList: [],
+    activation: { activated: false, fingerprint: '', at: '' },
     license: {
       deviceId: crypto.randomUUID(),
       gistId: '', gistToken: '', // فارغان دائماً لدى الزبائن — يُملآن فقط في نسخة المطوّر
@@ -181,91 +192,16 @@ function readLines(res, onLine) {
   res.on('end', () => { if (buf.trim()) onLine(buf); });
 }
 
-// ---------- أولاما (الذكاء الاصطناعي المحلي) ----------
-// stream:true + num_predict bound + keep_alive: يقلل زمن أول استجابة ويمنع الإطالة غير الضرورية
-function askOllama(model, messages, onChunk) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      model, messages, stream: true,
-      keep_alive: '30m',
-      options: { num_predict: 400, temperature: 0.4 }
-    });
-    const req = http.request({
-      hostname: '127.0.0.1', port: 11434, path: '/api/chat', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 120000
-    }, res => {
-      let full = '';
-      readLines(res, line => {
-        if (!line.trim()) return;
-        try {
-          const j = JSON.parse(line);
-          const delta = j.message && j.message.content;
-          if (delta) { full += delta; if (onChunk) onChunk(delta); }
-        } catch (e) { /* سطر غير مكتمل، تجاهله */ }
-      });
-      res.on('end', () => { full ? resolve(full) : reject(new Error('OLLAMA_PARSE')); });
-    });
-    req.on('error', () => reject(new Error('OLLAMA_OFFLINE')));
-    req.on('timeout', () => { req.destroy(); reject(new Error('OLLAMA_TIMEOUT')); });
-    req.write(body); req.end();
-  });
+// ---------- المساعد الذكي عبر Groq (سحابي، سريع، مجاني) ----------
+// إعدادات Groq الثابتة — المفتاح فقط قابل للتغيير (مشترك مدمج أو خاص بالزبون).
+const GROQ = { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' };
+
+// صيغة chat/completions مع بث SSE (نفس صيغة OpenAI التي يستخدمها Groq).
+function askGroq(apiKey, messages, onChunk) {
+  const provider = { baseUrl: GROQ.baseUrl, model: GROQ.model, apiKey };
+  return askOpenAICompatible(provider, messages, onChunk);
 }
 
-// يحمّل نموذج أولاما إلى الذاكرة في الخلفية عند بدء التطبيق (بدل انتظار أول سؤال من المستخدم)
-// — تحميل النموذج لأول مرة قد يستغرق 15+ ثانية على أجهزة بلا كرت شاشة مخصص، فتحميله مبكراً
-// يجعل أول سؤال فعلي من المستخدم يحصل على سرعة الاستجابة الطبيعية بدل الانتظار الكامل.
-function warmUpOllama(model) {
-  try {
-    const body = JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], stream: false, keep_alive: '30m', options: { num_predict: 1 } });
-    const req = http.request({
-      hostname: '127.0.0.1', port: 11434, path: '/api/chat', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 60000
-    }, res => { res.on('data', () => {}); res.on('end', () => {}); });
-    req.on('error', () => {}); // أولاما غير مشغّل — لا بأس، سيُكتشف لاحقاً عادياً عند الاستخدام الفعلي
-    req.on('timeout', () => req.destroy());
-    req.write(body); req.end();
-  } catch (e) { /* تجاهل بصمت */ }
-}
-
-// ---------- Claude API (اختياري إن وُضع مفتاح) ----------
-function askClaude(key, messages, onChunk) {
-  return new Promise((resolve, reject) => {
-    const system = messages.find(m => m.role === 'system');
-    const rest = messages.filter(m => m.role !== 'system');
-    const body = JSON.stringify({
-      model: 'claude-sonnet-5', max_tokens: 500, stream: true,
-      system: system ? system.content : undefined, messages: rest
-    });
-    const req = https.request({
-      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-      headers: {
-        'Content-Type': 'application/json', 'x-api-key': key,
-        'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body)
-      }, timeout: 60000
-    }, res => {
-      let full = '', gotError = null;
-      readLines(res, line => {
-        if (!line.startsWith('data: ')) return;
-        try {
-          const j = JSON.parse(line.slice(6));
-          if (j.type === 'content_block_delta' && j.delta && j.delta.text) {
-            full += j.delta.text; if (onChunk) onChunk(j.delta.text);
-          } else if (j.type === 'error') { gotError = j.error && j.error.message; }
-        } catch (e) { /* سطر غير مكتمل */ }
-      });
-      res.on('end', () => {
-        if (gotError) reject(new Error(gotError));
-        else if (full) resolve(full);
-        else reject(new Error('CLAUDE_ERROR'));
-      });
-    });
-    req.on('error', reject);
-    req.write(body); req.end();
-  });
-}
-
-// ---------- مزوّد متوافق مع OpenAI (يغطي Groq / Gemini / OpenAI / OpenRouter / DeepSeek بمسار واحد) ----------
-// كلها تستخدم نفس صيغة chat/completions مع بث SSE، فتكفي دالة واحدة لعشرات المزودات السحابية.
 function askOpenAICompatible(provider, messages, onChunk) {
   return new Promise((resolve, reject) => {
     let base;
@@ -354,50 +290,19 @@ function businessContext(d) {
 }
 
 // preloadedData: تمرير بيانات مُحمَّلة مسبقاً (مثلاً من بوت تلجرام) لتفادي قراءة ملف البيانات من القرص مرتين لكل رسالة.
-// onReset: يُستدعى إن بدأ Claude ببث نص جزئي ثم فشل، قبل التراجع إلى أولاما — لمسح النص الجزئي من الواجهة بدل دمجه مع رد مختلف.
-// يعيد قائمة المزودات الفعّالة بالترتيب: النشط أولاً ثم البقية كاحتياطي.
-// يدمج الإعدادات القديمة (anthropicKey/aiModel) كمزوّدات ضمنية للتوافق الرجعي.
-function resolveProviders(d) {
-  const userList = (d.settings.aiProviders || []).filter(p => p.enabled !== false);
-  const all = userList.slice();
-  // رتّب المزوّد النشط أولاً
-  const activeId = d.settings.activeProviderId;
-  if (activeId) {
-    const idx = all.findIndex(p => p.id === activeId);
-    if (idx > 0) { const [active] = all.splice(idx, 1); all.unshift(active); }
-  }
-  // المفتاح المشترك المدمج كاحتياطي (أو كافتراضي إن لم يضبط الزبون شيئاً)
+// يعيد مفتاح Groq الفعّال: الخاص بالزبون إن وُجد، وإلا المفتاح المشترك المدمج (builtin-ai.json).
+function activeGroqKey(d) {
+  if (d.settings.groqKey) return d.settings.groqKey;
   const builtin = builtinAiProvider();
-  if (builtin) all.push(builtin);
-  // توافق رجعي مع الإعدادات القديمة
-  if (!all.length) {
-    if (d.settings.anthropicKey) all.push({ id: 'legacy-claude', type: 'anthropic', apiKey: d.settings.anthropicKey });
-    all.push({ id: 'legacy-ollama', type: 'ollama', model: d.settings.aiModel || 'qwen2:latest' });
-  }
-  return all;
+  return builtin ? builtin.apiKey : '';
 }
 
-async function callProvider(provider, messages, onChunk) {
-  if (provider.type === 'ollama') return askOllama(provider.model || 'qwen2:latest', messages, onChunk);
-  if (provider.type === 'anthropic') return askClaude(provider.apiKey, messages, onChunk);
-  return askOpenAICompatible(provider, messages, onChunk); // openai-compatible وكل مشتقاته
-}
-
-async function askAI(userText, history = [], onChunk, preloadedData, onReset) {
+async function askAI(userText, history = [], onChunk, preloadedData) {
   const d = preloadedData || loadData();
+  const key = activeGroqKey(d);
+  if (!key) throw new Error('AI_NOT_CONFIGURED');
   const messages = [{ role: 'system', content: businessContext(d) }, ...history, { role: 'user', content: userText }];
-  const providers = resolveProviders(d);
-  let lastErr = null;
-  for (const provider of providers) {
-    let emittedAny = false;
-    try {
-      return await callProvider(provider, messages, delta => { emittedAny = true; if (onChunk) onChunk(delta); });
-    } catch (e) {
-      lastErr = e;
-      if (emittedAny && onReset) onReset(); // امسح النص الجزئي قبل تجربة المزوّد التالي
-    }
-  }
-  throw lastErr || new Error('NO_PROVIDER');
+  return askGroq(key, messages, onChunk);
 }
 
 // ---------- بوت تلجرام (خانات متعددة — نفس منطق الأوامر لكل بوت) ----------
@@ -420,37 +325,113 @@ function tgApi(token, method, payload) {
   });
 }
 
-async function tgHandle(token, msg) {
-  const chatId = msg.chat.id;
-  const text = (msg.text || '').trim();
-  const d = loadData();
+function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
+
+// يولّد PDF لتقرير مختصر عبر نافذة خفية (offscreen) + printToPDF — دون الاعتماد على واجهة المستخدم المرئية.
+async function generateReportPdfBuffer(d) {
+  const f = computeFinancials(d);
   const c = d.settings.currency;
-  let reply = '';
-  if (text === '/start') {
-    reply = `أهلاً بك في بوت "سند" 🌟\n\nالأوامر:\n/ملخص — ملخص المبيعات\n/منتجات — المخزون\n/فواتير — آخر الفواتير\n/مساهمين — توزيع الأرباح\n/ديون — ديون العملاء\n/محافظ — أرصدة الحسابات\nأو اسألني أي سؤال وسأجيبك بالذكاء الاصطناعي 🤖`;
-  } else if (text === '/ملخص' || text === '/summary') {
+  const today = new Date().toISOString().slice(0, 10);
+  const tally = {};
+  d.invoices.forEach(i => i.items.forEach(it => { tally[it.name] = (tally[it.name] || 0) + it.qty; }));
+  const top = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const rows = [
+    ['إجمالي المبيعات', f.totalSales], ['تكلفة البضاعة', f.totalCogs], ['الربح الإجمالي', f.grossProfit],
+    ['المصاريف', f.totalExpenses], ['صافي الربح', f.netProfit]
+  ];
+  const html = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><style>
+    body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;padding:40px;color:#111}
+    h1{color:#C8A45C;border-bottom:3px solid #C8A45C;padding-bottom:10px}
+    table{width:100%;border-collapse:collapse;margin:16px 0}
+    td,th{border:1px solid #ddd;padding:9px 12px;text-align:start}
+    th{background:#C8A45C;color:#000}
+    .thanks{text-align:center;color:#666;margin-top:30px;border-top:1px solid #C8A45C;padding-top:12px}
+  </style></head><body>
+    <h1>${escHtml(d.settings.businessName || 'سند')} — تقرير</h1>
+    <p>التاريخ: ${today}</p>
+    <table><tbody>${rows.map(([k, v]) => `<tr><td>${escHtml(k)}</td><td>${Math.round(v).toLocaleString('en-US')} ${escHtml(c)}</td></tr>`).join('')}</tbody></table>
+    <h3>الأكثر مبيعاً</h3>
+    <table><thead><tr><th>المنتج</th><th>الكمية</th></tr></thead><tbody>${top.length ? top.map(([n, q]) => `<tr><td>${escHtml(n)}</td><td>${q}</td></tr>`).join('') : '<tr><td colspan="2">لا يوجد</td></tr>'}</tbody></table>
+    <div class="thanks">${escHtml(d.settings.businessName || 'سند')}</div>
+  </body></html>`;
+  const offscreen = new BrowserWindow({ show: false, webPreferences: { offscreen: true } });
+  try {
+    await offscreen.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    const pdf = await offscreen.webContents.printToPDF({ printBackground: true, pageSize: 'A4' });
+    return pdf;
+  } finally { offscreen.destroy(); }
+}
+
+// إرسال ملف عبر تلجرام (multipart/form-data يدوي فوق https الخام).
+function tgSendDocument(token, chatId, filename, buffer, caption) {
+  return new Promise((resolve, reject) => {
+    const boundary = '----SenedBoundary' + Date.now();
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n` +
+      (caption ? `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n` : '') +
+      `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: application/pdf\r\n\r\n`, 'utf8');
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([head, buffer, tail]);
+    const req = https.request({
+      hostname: 'api.telegram.org', path: `/bot${token}/sendDocument`, method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }, timeout: 60000
+    }, res => { let out = ''; res.on('data', c => out += c); res.on('end', () => { try { resolve(JSON.parse(out)); } catch (e) { reject(e); } }); });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('TG_TIMEOUT')); });
+    req.write(body); req.end();
+  });
+}
+
+async function sendReportPdf(token, chatId, d) {
+  try {
+    const pdf = await generateReportPdfBuffer(d);
+    await tgSendDocument(token, chatId, `تقرير-${new Date().toISOString().slice(0, 10)}.pdf`, pdf, `📄 تقرير ${d.settings.businessName || 'سند'}`);
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: 'تم إرسال التقرير ✓', reply_markup: BOT_MENU });
+  } catch (e) {
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⚠️ تعذّر توليد التقرير: ' + e.message });
+  }
+}
+
+// قائمة أزرار جاهزة تظهر أسفل رسائل البوت — المستخدم يضغط بدل الكتابة
+const BOT_MENU = {
+  inline_keyboard: [
+    [{ text: '📊 ملخص اليوم', callback_data: 'summary' }, { text: '📦 المخزون', callback_data: 'products' }],
+    [{ text: '🧾 آخر الفواتير', callback_data: 'invoices' }, { text: '💳 الديون', callback_data: 'debts' }],
+    [{ text: '🏦 المحافظ', callback_data: 'wallets' }, { text: '📈 المساهمون', callback_data: 'shareholders' }],
+    [{ text: '📄 تقرير PDF', callback_data: 'pdf' }]
+  ]
+};
+
+// يبني نص أمر جاهز من مفتاح ثابت (يُستخدم من الأزرار والأوامر النصية معاً)
+function botCommandText(cmd, d) {
+  const c = d.settings.currency;
+  if (cmd === 'summary') {
     const total = d.invoices.reduce((s, i) => s + i.total, 0);
     const today = new Date().toISOString().slice(0, 10);
     const todayTotal = d.invoices.filter(i => i.date.slice(0, 10) === today).reduce((s, i) => s + i.total, 0);
-    reply = `📊 ملخص ${d.settings.businessName}:\n\n💰 إجمالي المبيعات: ${total} ${c}\n📅 مبيعات اليوم: ${todayTotal} ${c}\n🧾 عدد الفواتير: ${d.invoices.length}\n📦 المنتجات: ${d.products.length}\n👥 العملاء: ${d.customers.length}`;
-  } else if (text === '/منتجات' || text === '/products') {
-    reply = d.products.length
+    return `📊 ملخص ${d.settings.businessName}:\n\n💰 إجمالي المبيعات: ${total} ${c}\n📅 مبيعات اليوم: ${todayTotal} ${c}\n🧾 عدد الفواتير: ${d.invoices.length}\n📦 المنتجات: ${d.products.length}\n👥 العملاء: ${d.customers.length}`;
+  }
+  if (cmd === 'products') {
+    return d.products.length
       ? '📦 المخزون:\n\n' + d.products.map(p => `• ${p.name}: ${p.stock} قطعة — ${p.price} ${c}${p.stock <= 3 ? ' ⚠️' : ''}`).join('\n')
       : 'لا توجد منتجات بعد.';
-  } else if (text === '/فواتير' || text === '/invoices') {
-    reply = d.invoices.length
+  }
+  if (cmd === 'invoices') {
+    return d.invoices.length
       ? '🧾 آخر الفواتير:\n\n' + d.invoices.slice(-8).reverse().map(i => `#${i.number} | ${i.customerName || 'زبون'} | ${i.total} ${c} | ${i.date.slice(0, 10)}`).join('\n')
       : 'لا توجد فواتير بعد.';
-  } else if (text === '/مساهمين' || text === '/shareholders') {
+  }
+  if (cmd === 'shareholders') {
     const f = computeFinancials(d);
-    reply = d.shareholders.length
+    return d.shareholders.length
       ? `📈 توزيع الأرباح (صافي الربح: ${Math.round(f.netProfit)} ${c}):\n\n` + d.shareholders.map(sh => {
           const w = d.withdrawals.filter(x => x.shareholderId === sh.id).reduce((s, x) => s + Number(x.amount), 0);
           const share = f.netProfit * (Number(sh.percent) / 100);
           return `• ${sh.name} (${sh.percent}%): حصة ${Math.round(share)} ${c} — سُحب ${w} ${c} — الصافي المستحق ${Math.round(share - w)} ${c}`;
         }).join('\n')
       : 'لا يوجد مساهمون مسجلون بعد.';
-  } else if (text === '/ديون' || text === '/debts') {
+  }
+  if (cmd === 'debts') {
     const owing = d.invoices.reduce((s, i) => s + Math.max(0, i.total - (i.paidAmount || 0)), 0);
     const perCustomer = {};
     d.invoices.forEach(i => {
@@ -458,29 +439,68 @@ async function tgHandle(token, msg) {
       if (rem > 0) perCustomer[i.customerName || 'زبون نقدي'] = (perCustomer[i.customerName || 'زبون نقدي'] || 0) + rem;
     });
     const lines = Object.entries(perCustomer).map(([n, v]) => `• ${n}: ${Math.round(v)} ${c}`).join('\n');
-    reply = `💳 إجمالي ديون العملاء: ${Math.round(owing)} ${c}\n\n${lines || 'لا توجد ديون مستحقة'}`;
-  } else if (text === '/محافظ' || text === '/wallets') {
-    reply = d.wallets.length
+    return `💳 إجمالي ديون العملاء: ${Math.round(owing)} ${c}\n\n${lines || 'لا توجد ديون مستحقة'}`;
+  }
+  if (cmd === 'wallets') {
+    return d.wallets.length
       ? '🏦 المحافظ والحسابات:\n\n' + d.wallets.map(w => `• ${w.name} (${w.type}): ${Math.round(walletBalance(d, w.id))} ${c}`).join('\n')
       : 'لا توجد محافظ مسجلة بعد.';
-  } else if (text.startsWith('/claim ')) {
-    const code = text.slice(7).trim();
-    if (d.settings.license.ownerChatId) {
-      reply = '⚠️ هذا البوت مرتبط بالفعل بحساب إدارة.';
-    } else if (code === d.settings.license.claimCode) {
-      d.settings.license.ownerChatId = String(chatId);
-      saveData(d);
-      reply = '✓ تم تفعيل صلاحيات الإدارة لهذا الحساب. أرسل /clients لرؤية العملاء.';
-    } else {
-      reply = '⚠️ رمز غير صحيح.';
-    }
-  } else if (/^\/(register|clients|lock|unlock|msg)\b/.test(text)) {
-    reply = await handleAdminCommand(d, chatId, text);
-  } else if (text) {
-    try { reply = await askAI(text, [], null, d); }
-    catch (e) { reply = '⚠️ الذكاء الاصطناعي غير متاح حالياً. تأكد من تشغيل أولاما على الجهاز.'; }
   }
-  if (reply) await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
+  return null;
+}
+
+const CMD_MAP = {
+  '/ملخص': 'summary', '/summary': 'summary', '/منتجات': 'products', '/products': 'products',
+  '/فواتير': 'invoices', '/invoices': 'invoices', '/مساهمين': 'shareholders', '/shareholders': 'shareholders',
+  '/ديون': 'debts', '/debts': 'debts', '/محافظ': 'wallets', '/wallets': 'wallets'
+};
+
+async function tgHandle(token, msg) {
+  const chatId = msg.chat.id;
+  const text = (msg.text || '').trim();
+  const d = loadData();
+
+  if (text === '/start') {
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: `أهلاً بك في بوت "${d.settings.businessName}" 🌟\nاختر من الأزرار أدناه أو اكتب أي سؤال وسيجيبك المساعد الذكي:`, reply_markup: BOT_MENU });
+    return;
+  }
+  if (CMD_MAP[text]) {
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: botCommandText(CMD_MAP[text], d), reply_markup: BOT_MENU });
+    return;
+  }
+  if (text === '/pdf' || text === '/تقرير') { await sendReportPdf(token, chatId, d); return; }
+  if (text.startsWith('/claim ')) {
+    const code = text.slice(7).trim();
+    let reply;
+    if (d.settings.license.ownerChatId) reply = '⚠️ هذا البوت مرتبط بالفعل بحساب إدارة.';
+    else if (code === d.settings.license.claimCode) { d.settings.license.ownerChatId = String(chatId); saveData(d); reply = '✓ تم تفعيل صلاحيات الإدارة لهذا الحساب. أرسل /clients لرؤية العملاء.'; }
+    else reply = '⚠️ رمز غير صحيح.';
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
+    return;
+  }
+  if (/^\/(register|clients|lock|unlock|msg)\b/.test(text)) {
+    const reply = await handleAdminCommand(d, chatId, text);
+    if (reply) await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
+    return;
+  }
+  if (text) {
+    let reply;
+    try { reply = await askAI(text, [], null, d); }
+    catch (e) { reply = e.message === 'AI_NOT_CONFIGURED' ? '⚠️ المساعد الذكي غير مضبوط بعد (مفتاح Groq).' : '⚠️ المساعد الذكي غير متاح حالياً، تحقق من اتصال الإنترنت.'; }
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply, reply_markup: BOT_MENU });
+  }
+}
+
+// معالجة ضغط أزرار القائمة (callback_query)
+async function tgHandleCallback(token, cbq) {
+  const chatId = cbq.message && cbq.message.chat && cbq.message.chat.id;
+  const data = cbq.data;
+  await tgApi(token, 'answerCallbackQuery', { callback_query_id: cbq.id }).catch(() => {});
+  if (!chatId) return;
+  const d = loadData();
+  if (data === 'pdf') { await sendReportPdf(token, chatId, d); return; }
+  const reply = botCommandText(data, d);
+  if (reply) await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply, reply_markup: BOT_MENU });
 }
 
 async function handleAdminCommand(d, chatId, text) {
@@ -553,6 +573,7 @@ async function tgLoop(botId) {
         for (const u of res.result) {
           bot.offset = u.update_id + 1;
           if (u.message) tgHandle(bot.token, u.message).catch(() => {});
+          else if (u.callback_query) tgHandleCallback(bot.token, u.callback_query).catch(() => {});
         }
       }
       if (win && !win.isDestroyed()) win.webContents.send('tg-status', { id: botId, running: true });
@@ -570,28 +591,14 @@ ipcMain.handle('ai:ask', async (e, { text, history }) => {
   try {
     const full = await askAI(
       text, history || [],
-      delta => { if (!e.sender.isDestroyed()) e.sender.send('ai:chunk', delta); },
-      undefined,
-      () => { if (!e.sender.isDestroyed()) e.sender.send('ai:reset'); }
+      delta => { if (!e.sender.isDestroyed()) e.sender.send('ai:chunk', delta); }
     );
     return { ok: true, text: full };
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('ai:check', async () => {
   const d = loadData();
-  const active = resolveProviders(d)[0];
-  // مزوّد سحابي: يكفي وجود مفتاح — لا حاجة لفحص محلي، يُعتبر متاحاً (يتحقق فعلياً عند أول سؤال)
-  if (active && active.type !== 'ollama') {
-    return { ok: !!active.apiKey, cloud: true, providerName: active.name || active.type };
-  }
-  return new Promise(resolve => {
-    const req = http.get({ hostname: '127.0.0.1', port: 11434, path: '/api/tags', timeout: 3000 }, res => {
-      let out = ''; res.on('data', c => out += c);
-      res.on('end', () => { try { resolve({ ok: true, models: JSON.parse(out).models.map(m => m.name) }); } catch (e) { resolve({ ok: false }); } });
-    });
-    req.on('error', () => resolve({ ok: false }));
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
-  });
+  return { ok: !!activeGroqKey(d), cloud: true };
 });
 // أسماء الأوامر يجب أن تكون بأحرف إنجليزية صغيرة فقط حسب قواعد تلجرام (a-z0-9_)
 // — تظهر بهذا الشكل في قائمة الاقتراحات، لكن الوصف بالعربية، والبوت يقبل أيضاً الاسم العربي المكافئ عند الكتابة اليدوية
@@ -602,7 +609,8 @@ const TG_COMMANDS = [
   { command: 'invoices', description: 'آخر الفواتير المسجّلة' },
   { command: 'shareholders', description: 'توزيع الأرباح على المساهمين' },
   { command: 'debts', description: 'ديون العملاء غير المحصّلة' },
-  { command: 'wallets', description: 'أرصدة المحافظ والحسابات' }
+  { command: 'wallets', description: 'أرصدة المحافظ والحسابات' },
+  { command: 'pdf', description: 'إرسال تقرير PDF' }
 ];
 
 ipcMain.handle('tg:start', async (e, { id, token }) => {
@@ -665,19 +673,40 @@ ipcMain.handle('license:createGist', async (e, token) => {
 // المطوّر فقط: يكتب المفتاح المشترك في builtin-ai.json ليُشحن مع النسخة الموزّعة
 ipcMain.handle('ai:setBuiltinKey', async (e, cfg) => {
   try {
-    if (!cfg || !cfg.apiKey) { // مسح المفتاح
-      const p = path.join(__dirname, 'builtin-ai.json');
-      if (fs.existsSync(p)) fs.unlinkSync(p);
-      BUILTIN_AI = null;
-      return { ok: true, cleared: true };
-    }
-    writeBuiltinAi({ name: cfg.name || 'Sened AI', type: 'openai-compatible', baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model });
+    if (!cfg || !cfg.apiKey) { writeBuiltinConfig({ apiKey: '' }); return { ok: true, cleared: true }; }
+    writeBuiltinConfig({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, name: cfg.name || 'Sened AI' });
     return { ok: true };
   } catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('ai:builtinInfo', () => {
   const b = builtinAiProvider();
   return b ? { present: true, name: b.name, model: b.model } : { present: false };
+});
+
+// ---------- تفعيل المطوّر (كود يُدخَل مرة واحدة على الجهاز، مربوط ببصمة الجهاز) ----------
+// المطوّر فقط: يضبط كود التفعيل المدمج (يُشحن مع النسخة الموزّعة، لا يُرفع للمستودع العام)
+ipcMain.handle('activation:setDevCode', (e, code) => {
+  try { writeBuiltinConfig({ activationCode: (code || '').trim() }); return { ok: true, hasCode: !!(code || '').trim() }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+ipcMain.handle('activation:hasDevCode', () => ({ hasCode: !!builtinActivationCode() }));
+// حالة التفعيل: هل يحتاج هذا الجهاز إدخال الكود؟ (إن لم يُضبط كود مدمج، فالتفعيل معطّل والتطبيق حر)
+ipcMain.handle('activation:status', () => {
+  const devCode = builtinActivationCode();
+  if (!devCode) return { required: false }; // لا كود مدمج → التطبيق يعمل بحرية (نسخة تطوير/عامة)
+  const d = loadData();
+  const act = d.settings.activation || {};
+  const activated = act.activated && act.fingerprint === machineFingerprint();
+  return { required: !activated };
+});
+ipcMain.handle('activation:verify', (e, code) => {
+  const devCode = builtinActivationCode();
+  if (!devCode) return { ok: true }; // لا كود مطلوب
+  if ((code || '').trim() !== devCode) return { ok: false };
+  const d = loadData();
+  d.settings.activation = { activated: true, fingerprint: machineFingerprint(), at: new Date().toISOString() };
+  saveData(d);
+  return { ok: true };
 });
 ipcMain.handle('auth:verify', (e, { username, password }) => {
   const d = loadData();
@@ -725,9 +754,6 @@ app.whenReady().then(() => {
   createWindow();
   takeBackup();
   checkLicenseStatus();
-  const d = loadData();
-  const active = resolveProviders(d)[0];
-  if (active && active.type === 'ollama') warmUpOllama(active.model || 'qwen2:latest');
   setInterval(takeBackup, 60 * 60 * 1000); // نسخة احتياطية إضافية كل ساعة أثناء التشغيل
   setInterval(checkLicenseStatus, 30 * 60 * 1000); // تحقق من حالة الترخيص كل نصف ساعة
 });

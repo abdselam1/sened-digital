@@ -22,5 +22,9 @@ contextBridge.exposeInMainWorld('sened', {
   licenseCreateGist: (token) => ipcRenderer.invoke('license:createGist', token),
   onLicenseStatus: (cb) => ipcRenderer.on('license:status', (e, s) => cb(s)),
   aiSetBuiltinKey: (cfg) => ipcRenderer.invoke('ai:setBuiltinKey', cfg),
-  aiBuiltinInfo: () => ipcRenderer.invoke('ai:builtinInfo')
+  aiBuiltinInfo: () => ipcRenderer.invoke('ai:builtinInfo'),
+  activationStatus: () => ipcRenderer.invoke('activation:status'),
+  activationVerify: (code) => ipcRenderer.invoke('activation:verify', code),
+  activationSetDevCode: (code) => ipcRenderer.invoke('activation:setDevCode', code),
+  activationHasDevCode: () => ipcRenderer.invoke('activation:hasDevCode')
 });
