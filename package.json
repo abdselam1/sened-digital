@@ -46,6 +46,14 @@
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "سند للمبيعات",
+      "runAfterFinish": false
+    },
     "linux": {
       "target": "AppImage",
       "icon": "assets/icon-512.png"
@@ -54,5 +62,9 @@
       "target": "dmg",
       "icon": "assets/icon-512.png"
     }
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
   }
 }

@@ -26,5 +26,16 @@ contextBridge.exposeInMainWorld('sened', {
   activationStatus: () => ipcRenderer.invoke('activation:status'),
   activationVerify: (code) => ipcRenderer.invoke('activation:verify', code),
   activationSetDevCode: (code) => ipcRenderer.invoke('activation:setDevCode', code),
-  activationHasDevCode: () => ipcRenderer.invoke('activation:hasDevCode')
+  activationHasDevCode: () => ipcRenderer.invoke('activation:hasDevCode'),
+  appFlavor: () => ipcRenderer.invoke('app:flavor'),
+  appSetFlavor: (flavor) => ipcRenderer.invoke('app:setFlavor', flavor),
+  cashierIp: () => ipcRenderer.invoke('app:cashierIp'),
+  onSyncUpdated: (cb) => ipcRenderer.on('sync:updated', () => cb()),
+  deviceRoleGet: () => ipcRenderer.invoke('deviceRole:get'),
+  deviceRoleSet: (role) => ipcRenderer.invoke('deviceRole:set', role),
+  deviceRoleClear: () => ipcRenderer.invoke('deviceRole:clear'),
+  lanGetConfig: () => ipcRenderer.invoke('lan:getConfig'),
+  lanSetConfig: (cfg) => ipcRenderer.invoke('lan:setConfig', cfg),
+  lanStatus: () => ipcRenderer.invoke('lan:status'),
+  lanTest: (ip, port, token) => ipcRenderer.invoke('lan:test', { ip, port, token })
 });

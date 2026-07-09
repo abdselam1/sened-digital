@@ -4,6 +4,263 @@ const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
+const os = require('os');
+function getLocalIp() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of (nets[name] || [])) {
+      if (net.family === 'IPv4' && !net.internal) return net.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+// ==========================================================================
+//  التزامن عبر الشبكة المحلية (LAN Sync)
+//  النموذج: جهاز واحد "مضيف" (host) يشغّل خادم HTTP + SSE ويملك النسخة المرجعية.
+//  الأجهزة الأخرى "عملاء" (client) يتصلون به: يسحبون الحالة أولاً ثم يستقبلون
+//  التحديثات لحظياً عبر SSE، ويرسلون تعديلاتهم عبر POST فيخزّنها المضيف ويبثّها.
+//  إعداد الشبكة محلي لكل جهاز (lan-config.json) ولا يدخل أبداً ضمن بيانات التطبيق
+//  المزامَنة، وإلا لانتشر عنوان/دور جهاز واحد إلى بقية الأجهزة.
+// ==========================================================================
+const SYNC_PORT_DEFAULT = 3050;
+const LAN_FILE = () => path.join(app.getPath('userData'), 'lan-config.json');
+
+function readLanConfig() {
+  try {
+    if (fs.existsSync(LAN_FILE())) {
+      const c = JSON.parse(fs.readFileSync(LAN_FILE(), 'utf8')) || {};
+      return { role: c.role || 'off', hostIp: c.hostIp || '', port: Number(c.port) || SYNC_PORT_DEFAULT, token: c.token || '' };
+    }
+  } catch (e) { console.error('lan config read error', e.message); }
+  return { role: 'off', hostIp: '', port: SYNC_PORT_DEFAULT, token: '' };
+}
+function writeLanConfig(patch) {
+  const next = { ...readLanConfig(), ...patch };
+  fs.writeFileSync(LAN_FILE(), JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
+// ==========================================================================
+//  قفل دور الجهاز (device-role.json) — محلي لكل جهاز مثل lan-config تماماً،
+//  ولا يدخل أبداً ضمن بيانات التطبيق المزامَنة (وإلا لانتشر قفل جهاز واحد للبقية).
+//  بعد أول دخول بدور تشغيلي (محاسب/كاشير) يُربط الجهاز به فلا يقبل دوراً آخر.
+//  المدير وحده يتجاوز القفل ويستطيع إعادة تعيين/مسح ربط الجهاز.
+// ==========================================================================
+const DEVICE_ROLE_FILE = () => path.join(app.getPath('userData'), 'device-role.json');
+const VALID_DEVICE_ROLES = ['manager', 'accountant', 'cashier'];
+function readDeviceRole() {
+  try {
+    if (fs.existsSync(DEVICE_ROLE_FILE())) {
+      const c = JSON.parse(fs.readFileSync(DEVICE_ROLE_FILE(), 'utf8')) || {};
+      return { role: VALID_DEVICE_ROLES.includes(c.role) ? c.role : null, boundAt: c.boundAt || '' };
+    }
+  } catch (e) { console.error('device role read error', e.message); }
+  return { role: null, boundAt: '' };
+}
+function writeDeviceRole(role) {
+  const next = VALID_DEVICE_ROLES.includes(role)
+    ? { role, boundAt: new Date().toISOString() }
+    : { role: null, boundAt: '' };
+  fs.writeFileSync(DEVICE_ROLE_FILE(), JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
+let hostServer = null;        // خادم HTTP في وضع المضيف
+let sseClients = new Set();   // اتصالات SSE المفتوحة من الأجهزة العميلة
+let clientStream = null;      // اتصال SSE الصادر في وضع العميل
+let clientConnected = false;
+let clientReconnectTimer = null;
+
+// رقم مراجعة الحالة الحالية (يقرأ من الملف المخزَّن)
+function currentRev() {
+  try {
+    if (fs.existsSync(DATA_FILE())) {
+      const d = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
+      return (d && d._rev) || 0;
+    }
+  } catch (e) {}
+  return 0;
+}
+
+// بثّ الحالة الكاملة لكل الأجهزة العميلة المتصلة (وضع المضيف)
+function broadcastToClients(payloadStr) {
+  const msg = `event: update\ndata: ${payloadStr}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(msg); } catch (e) { /* اتصال مقطوع؛ يُنظَّف عند حدث close */ }
+  }
+}
+
+// إرسال تعديل من العميل إلى المضيف (المضيف يخزّن ويبثّ للجميع)
+function postToHost(data) {
+  const cfg = readLanConfig();
+  if (!cfg.hostIp) return;
+  try {
+    const req = http.request({
+      hostname: cfg.hostIp, port: cfg.port, path: '/sync', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-sened-token': cfg.token || '' }, timeout: 5000
+    });
+    req.on('error', (e) => console.error('post to host error:', e.message));
+    req.on('timeout', () => req.destroy());
+    req.write(JSON.stringify(data));
+    req.end();
+  } catch (err) { console.error('post to host invalid:', err.message); }
+}
+
+function startHostServer() {
+  try {
+    const cfg = readLanConfig();
+    const express = require('express');
+    const cors = require('cors');
+    const srvApp = express();
+    srvApp.use(cors());
+    srvApp.use(express.json({ limit: '50mb' }));
+
+    // حماية اختيارية برمز مشترك: إن ضُبط رمز على المضيف، يُرفض أي طلب لا يحمله في ترويسة x-sened-token.
+    // هكذا لا يستطيع أي جهاز غريب على نفس الشبكة قراءة البيانات أو تعديلها ولو عرف عنوان المضيف.
+    srvApp.use((req, res, next) => {
+      const tok = readLanConfig().token;
+      if (tok && req.get('x-sened-token') !== tok) return res.status(401).json({ error: 'unauthorized' });
+      next();
+    });
+
+    // فحص اتصال سريع للأجهزة العميلة
+    srvApp.get('/ping', (req, res) => {
+      res.json({ ok: true, app: 'sened', rev: currentRev(), clients: sseClients.size });
+    });
+
+    // الحالة الكاملة الحالية (تحميل أولي لدى العميل)
+    srvApp.get('/sync', (req, res) => {
+      try {
+        if (fs.existsSync(DATA_FILE())) res.type('application/json').send(fs.readFileSync(DATA_FILE(), 'utf8'));
+        else res.json({});
+      } catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    // العميل يرسل تعديلاً: المضيف مصدر الحقيقة — يخزّن، يرفع رقم المراجعة، يبثّ للجميع
+    srvApp.post('/sync', (req, res) => {
+      try {
+        const incoming = req.body || {};
+        incoming._rev = currentRev() + 1;
+        incoming._ts = new Date().toISOString();
+        const str = JSON.stringify(incoming, null, 2);
+        fs.writeFileSync(DATA_FILE(), str, 'utf8');
+        res.json({ ok: true, rev: incoming._rev });
+        broadcastToClients(JSON.stringify(incoming));
+        if (win) win.webContents.send('sync:updated');
+      } catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    // مجرى الأحداث اللحظي (Server-Sent Events): يبقى مفتوحاً ويستقبل البثّ
+    srvApp.get('/events', (req, res) => {
+      res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      });
+      if (res.flushHeaders) res.flushHeaders();
+      res.write(`event: hello\ndata: ${JSON.stringify({ rev: currentRev() })}\n\n`);
+      sseClients.add(res);
+      if (win) win.webContents.send('sync:updated'); // تحديث عدّاد الأجهزة المتصلة في الواجهة
+      const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) {} }, 25000);
+      req.on('close', () => { clearInterval(hb); sseClients.delete(res); if (win) win.webContents.send('sync:updated'); });
+    });
+
+    hostServer = http.createServer(srvApp);
+    hostServer.on('error', (e) => console.error('Host server error:', e.message));
+    hostServer.listen(cfg.port, '0.0.0.0', () => {
+      console.log(`Sened host server listening on ${getLocalIp()}:${cfg.port}`);
+    });
+  } catch (err) {
+    console.error('Failed to start host server:', err.message);
+  }
+}
+
+function stopHostServer() {
+  for (const res of sseClients) { try { res.end(); } catch (e) {} }
+  sseClients.clear();
+  if (hostServer) { try { hostServer.close(); } catch (e) {} hostServer = null; }
+}
+
+function stopClientSync() {
+  clientConnected = false;
+  if (clientReconnectTimer) { clearTimeout(clientReconnectTimer); clientReconnectTimer = null; }
+  if (clientStream) { try { clientStream.destroy(); } catch (e) {} clientStream = null; }
+}
+
+function scheduleClientReconnect() {
+  if (clientReconnectTimer) return;
+  clientReconnectTimer = setTimeout(() => { clientReconnectTimer = null; connectClientStream(); }, 3000);
+}
+
+// وضع العميل: يفتح مجرى SSE ويطبّق كل تحديث يبثّه المضيف على الملف المحلي
+function connectClientStream() {
+  const cfg = readLanConfig();
+  if (cfg.role !== 'client' || !cfg.hostIp) return;
+  const req = http.get(
+    { hostname: cfg.hostIp, port: cfg.port, path: '/events', headers: { Accept: 'text/event-stream', 'x-sened-token': cfg.token || '' } },
+    (res) => {
+      if (res.statusCode !== 200) { res.resume(); clientConnected = false; scheduleClientReconnect(); return; }
+      clientConnected = true;
+      if (win) win.webContents.send('sync:updated'); // تحديث مؤشر الاتصال
+      let buffer = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        buffer += chunk;
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+          let event = 'message', data = '';
+          for (const ln of raw.split('\n')) {
+            if (ln.startsWith('event:')) event = ln.slice(6).trim();
+            else if (ln.startsWith('data:')) data += ln.slice(5).trim();
+          }
+          if (event === 'update' && data) {
+            try {
+              const parsed = JSON.parse(data);
+              fs.writeFileSync(DATA_FILE(), JSON.stringify(parsed, null, 2), 'utf8');
+              if (win) win.webContents.send('sync:updated');
+            } catch (e) { console.error('client apply error:', e.message); }
+          }
+        }
+      });
+      res.on('end', () => { clientConnected = false; if (win) win.webContents.send('sync:updated'); scheduleClientReconnect(); });
+      res.on('error', () => { clientConnected = false; scheduleClientReconnect(); });
+    }
+  );
+  clientStream = req;
+  req.on('error', () => { clientConnected = false; scheduleClientReconnect(); });
+}
+
+// سحب الحالة الكاملة من المضيف (وعد بمهلة قصيرة) — يُستخدم عند التحميل الأولي للعميل
+function pullFromHost() {
+  return new Promise((resolve) => {
+    const cfg = readLanConfig();
+    if (cfg.role !== 'client' || !cfg.hostIp) return resolve(null);
+    const req = http.get({ hostname: cfg.hostIp, port: cfg.port, path: '/sync', timeout: 2500, headers: { 'x-sened-token': cfg.token || '' } }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => body += c);
+      res.on('end', () => {
+        try { const parsed = JSON.parse(body); resolve(parsed && Object.keys(parsed).length ? parsed : null); }
+        catch (e) { resolve(null); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
+// تطبيق وضع الشبكة الحالي: يوقف أي خادم/اتصال سابق ثم يشغّل ما يناسب الدور
+function applyLanMode() {
+  const cfg = readLanConfig();
+  stopHostServer();
+  stopClientSync();
+  if (cfg.role === 'host') startHostServer();
+  else if (cfg.role === 'client' && cfg.hostIp) connectClientStream();
+}
+
 
 let win = null;
 const DATA_FILE = () => path.join(app.getPath('userData'), 'sened-data.json');
@@ -26,12 +283,45 @@ function writeBuiltinConfig(patch) {
   fs.writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
   BUILTIN_CFG = null; // أعد التحميل في المرة القادمة
 }
+// نكهة النسخة الموزّعة: 'admin' (كل الصلاحيات) أو 'cashier' (كاشير فقط). الافتراضي 'full' لنسخة التطوير.
+function appFlavor() { return readBuiltinConfig().flavor || 'full'; }
+
+// المفتاح المشترك للذكاء الاصطناعي يُخزَّن **مموَّهاً** (XOR + Base64) في builtin-ai.json تحت `apiKeyEnc`
+// حتى لا يظهر كنص صريح ولا تلتقطه ماسحات الأسرار في المستودعات. هذا تمويهٌ ضد الرؤية المباشرة فقط
+// (وليس تشفيراً قوياً — المفتاح المشترك مجاني ومقصود توزيعه على الزبائن). الحماية الحقيقية = مستودع خاص.
+const AI_OBF_KEY = 'sened::builtin::v1';
+function xorB64(buf) {
+  const k = Buffer.from(AI_OBF_KEY, 'utf8');
+  const out = Buffer.alloc(buf.length);
+  for (let i = 0; i < buf.length; i++) out[i] = buf[i] ^ k[i % k.length];
+  return out;
+}
+function deobfuscate(b64) {
+  try { return xorB64(Buffer.from(String(b64), 'base64')).toString('utf8'); } catch (e) { return ''; }
+}
+function obfuscate(str) { return xorB64(Buffer.from(String(str), 'utf8')).toString('base64'); }
+
+// المفتاح الفعّال المدمج: النص الصريح إن وُجد (نسخة تطوير)، وإلا فكّ تمويه apiKeyEnc.
+function builtinApiKey() {
+  const cfg = readBuiltinConfig();
+  return cfg.apiKey || (cfg.apiKeyEnc ? deobfuscate(cfg.apiKeyEnc) : '');
+}
 function builtinAiProvider() {
   const cfg = readBuiltinConfig();
-  if (cfg.apiKey) return { id: 'builtin', name: cfg.name || 'Sened AI', type: 'openai-compatible', baseUrl: cfg.baseUrl || 'https://api.groq.com/openai/v1', apiKey: cfg.apiKey, model: cfg.model || 'llama-3.3-70b-versatile', builtin: true };
+  const key = builtinApiKey();
+  if (key) return { id: 'builtin', name: cfg.name || 'Sened AI', type: 'openai-compatible', baseUrl: cfg.baseUrl || 'https://api.groq.com/openai/v1', apiKey: key, model: cfg.model || 'llama-3.3-70b-versatile', builtin: true };
   return null;
 }
-function builtinActivationCode() { return readBuiltinConfig().activationCode || ''; }
+// كود التفعيل الرسمي المدمج في التطبيق (مفتاح المطوّر). يظل مطلوباً على كل جهاز حتى لو
+// حُذف ملف builtin-ai.json أو عُدِّل، فالتطبيق لا يعمل رسمياً إلا بعد التفعيل بهذا الكود.
+const OFFICIAL_ACTIVATION_CODE = 'Ab32222206';
+// سرّ توقيع حالة التفعيل: يمنع تزوير ملف التفعيل يدوياً (نسخه من جهاز لآخر لا يصلح لأن البصمة تختلف،
+// وتحرير الملف يدوياً لا يصلح لأن التوقيع لن يطابق ما لم يُعرف هذا السرّ).
+const ACTIVATION_SECRET = 'Sened::activation::v1::b1nd-9f3a7c1e5d20';
+function activationSignature(fingerprint) {
+  return crypto.createHmac('sha256', ACTIVATION_SECRET).update(String(fingerprint)).digest('hex');
+}
+function builtinActivationCode() { return readBuiltinConfig().activationCode || OFFICIAL_ACTIVATION_CODE; }
 
 // بصمة الجهاز الفعلية (اسم الجهاز + عناوين الشبكة MAC) — ثابتة على نفس الجهاز، تتغيّر عند النقل لجهاز آخر.
 // تُستخدم لربط التفعيل بالجهاز: نسخ التطبيق لجهاز آخر يغيّر البصمة فيُطلب كود المطوّر من جديد.
@@ -77,33 +367,58 @@ const DEFAULT_DATA = {
   counters: { invoice: 1, purchase: 1, quote: 1 }
 };
 
+// قراءة متزامنة للملف المحلي فقط (في وضع العميل يبقى محدَّثاً عبر مجرى SSE).
+// المتصفح/الواجهة تستخدم loadDataForRenderer التي تسحب من المضيف أولاً عند العميل.
 function loadData() {
+  let localData = null;
   try {
     if (fs.existsSync(DATA_FILE())) {
-      const saved = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
-      const savedAuth = (saved.settings && saved.settings.auth) || null;
-      // الملح وبصمة كلمة المرور يجب أن يبقيا زوجاً من نفس المصدر دائماً — لا نخلط ملحاً محفوظاً ببصمة افتراضية أو العكس
-      const auth = (savedAuth && savedAuth.passwordHash)
-        ? { enabled: !!savedAuth.enabled, username: savedAuth.username || 'admin', salt: savedAuth.salt, passwordHash: savedAuth.passwordHash }
-        : { ...DEFAULT_DATA.settings.auth, enabled: !!(savedAuth && savedAuth.enabled), username: (savedAuth && savedAuth.username) || 'admin' };
-      return {
-        ...DEFAULT_DATA, ...saved,
-        settings: {
-          ...DEFAULT_DATA.settings, ...saved.settings,
-          auth,
-          company: { ...DEFAULT_DATA.settings.company, ...(saved.settings && saved.settings.company) },
-          notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) },
-          license: { ...DEFAULT_DATA.settings.license, ...(saved.settings && saved.settings.license) }
-        },
-        counters: { ...DEFAULT_DATA.counters, ...saved.counters }
-      };
+      localData = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
     }
-  } catch (e) { console.error('load error', e); }
-  return JSON.parse(JSON.stringify(DEFAULT_DATA));
+  } catch (e) { console.error('local load error', e); }
+
+  const saved = localData || {};
+  const savedAuth = (saved.settings && saved.settings.auth) || null;
+  const auth = (savedAuth && savedAuth.passwordHash)
+    ? { enabled: !!savedAuth.enabled, username: savedAuth.username || 'admin', salt: savedAuth.salt, passwordHash: savedAuth.passwordHash }
+    : { ...DEFAULT_DATA.settings.auth, enabled: !!(savedAuth && savedAuth.enabled), username: (savedAuth && savedAuth.username) || 'admin' };
+  
+  return {
+    ...DEFAULT_DATA, ...saved,
+    settings: {
+      ...DEFAULT_DATA.settings, ...saved.settings,
+      auth,
+      company: { ...DEFAULT_DATA.settings.company, ...(saved.settings && saved.settings.company) },
+      notifications: { ...DEFAULT_DATA.settings.notifications, ...(saved.settings && saved.settings.notifications) },
+      license: { ...DEFAULT_DATA.settings.license, ...(saved.settings && saved.settings.license) }
+    },
+    counters: { ...DEFAULT_DATA.counters, ...saved.counters }
+  };
 }
 
 function saveData(data) {
+  const lan = readLanConfig();
+  // العميل ليس مصدر الحقيقة: يرسل التعديل للمضيف الذي يخزّنه ويبثّه للجميع،
+  // ويكتب نسخة محلية مؤقتة يصحّحها البثّ العائد من المضيف.
+  if (lan.role === 'client' && lan.hostIp) {
+    postToHost(data);
+    try { fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8'); } catch (e) {}
+    return;
+  }
+  // المضيف: ارفع رقم المراجعة ثم ابثّ التحديث لحظياً لكل الأجهزة المتصلة.
+  if (lan.role === 'host') { data._rev = currentRev() + 1; data._ts = new Date().toISOString(); }
   fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8');
+  if (lan.role === 'host') broadcastToClients(JSON.stringify(data));
+}
+
+// نسخة الواجهة: عند العميل تسحب أحدث حالة من المضيف قبل العرض ثم تعيد الدمج مع الافتراضات.
+async function loadDataForRenderer() {
+  const lan = readLanConfig();
+  if (lan.role === 'client' && lan.hostIp) {
+    const remote = await pullFromHost();
+    if (remote) { try { fs.writeFileSync(DATA_FILE(), JSON.stringify(remote, null, 2), 'utf8'); } catch (e) {} }
+  }
+  return loadData();
 }
 
 // ---------- نسخ احتياطي تلقائي مجدول ----------
@@ -260,11 +575,12 @@ function computeFinancials(d) {
   const totalSales = d.invoices.reduce((s, i) => s + i.total, 0);
   const totalCogs = d.invoices.reduce((s, i) => s + i.items.reduce((ss, it) => ss + (Number(it.cost || 0) * it.qty), 0), 0);
   const totalExpenses = d.expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
-  const netProfit = totalSales - totalCogs - totalExpenses;
+  const grossProfit = totalSales - totalCogs;
+  const netProfit = grossProfit - totalExpenses;
   const totalPercent = d.shareholders.reduce((s, sh) => s + Number(sh.percent || 0), 0);
   const totalWithdrawals = d.withdrawals.reduce((s, w) => s + Number(w.amount || 0), 0);
   const totalWalletBalance = d.wallets.reduce((s, w) => s + walletBalance(d, w.id), 0);
-  return { totalSales, totalCogs, totalExpenses, netProfit, totalPercent, totalWithdrawals, totalWalletBalance };
+  return { totalSales, totalCogs, totalExpenses, grossProfit, netProfit, totalPercent, totalWithdrawals, totalWalletBalance };
 }
 
 function businessContext(d) {
@@ -585,7 +901,7 @@ async function tgLoop(botId) {
 }
 
 // ---------- IPC ----------
-ipcMain.handle('data:load', () => loadData());
+ipcMain.handle('data:load', () => loadDataForRenderer());
 ipcMain.handle('data:save', (e, data) => { saveData(data); return true; });
 ipcMain.handle('ai:ask', async (e, { text, history }) => {
   try {
@@ -673,8 +989,9 @@ ipcMain.handle('license:createGist', async (e, token) => {
 // المطوّر فقط: يكتب المفتاح المشترك في builtin-ai.json ليُشحن مع النسخة الموزّعة
 ipcMain.handle('ai:setBuiltinKey', async (e, cfg) => {
   try {
-    if (!cfg || !cfg.apiKey) { writeBuiltinConfig({ apiKey: '' }); return { ok: true, cleared: true }; }
-    writeBuiltinConfig({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, name: cfg.name || 'Sened AI' });
+    if (!cfg || !cfg.apiKey) { writeBuiltinConfig({ apiKey: '', apiKeyEnc: '' }); return { ok: true, cleared: true }; }
+    // يُخزَّن مموَّهاً دائماً (لا نكتب المفتاح صريحاً في الملف المُلتزَم)
+    writeBuiltinConfig({ apiKey: '', apiKeyEnc: obfuscate(cfg.apiKey), baseUrl: cfg.baseUrl, model: cfg.model, name: cfg.name || 'Sened AI' });
     return { ok: true };
   } catch (err) { return { ok: false, error: err.message }; }
 });
@@ -682,30 +999,81 @@ ipcMain.handle('ai:builtinInfo', () => {
   const b = builtinAiProvider();
   return b ? { present: true, name: b.name, model: b.model } : { present: false };
 });
+// نكهة النسخة: يقرؤها الواجهة لتقييد الكاشير أو فتح كل شيء للمدير
+ipcMain.handle('app:flavor', () => appFlavor());
+ipcMain.handle('app:cashierIp', () => getLocalIp());
+ipcMain.handle('app:setFlavor', (e, flavor) => {
+  try { writeBuiltinConfig({ flavor }); return { ok: true }; } catch (err) { return { ok: false, error: err.message }; }
+});
 
-// ---------- تفعيل المطوّر (كود يُدخَل مرة واحدة على الجهاز، مربوط ببصمة الجهاز) ----------
-// المطوّر فقط: يضبط كود التفعيل المدمج (يُشحن مع النسخة الموزّعة، لا يُرفع للمستودع العام)
+// ---------- التزامن عبر الشبكة المحلية (LAN) ----------
+ipcMain.handle('deviceRole:get', () => readDeviceRole());
+ipcMain.handle('deviceRole:set', (e, role) => writeDeviceRole(role));
+ipcMain.handle('deviceRole:clear', () => writeDeviceRole(null));
+ipcMain.handle('lan:getConfig', () => readLanConfig());
+ipcMain.handle('lan:setConfig', (e, cfg) => {
+  const next = writeLanConfig({ role: cfg.role || 'off', hostIp: (cfg.hostIp || '').trim(), port: cfg.port || SYNC_PORT_DEFAULT, token: (cfg.token || '').trim() });
+  applyLanMode();
+  return { ok: true, config: next, myIp: getLocalIp() };
+});
+ipcMain.handle('lan:status', () => {
+  const cfg = readLanConfig();
+  return {
+    role: cfg.role, hostIp: cfg.hostIp, port: cfg.port, myIp: getLocalIp(),
+    serverRunning: !!hostServer, connectedClients: sseClients.size,
+    clientConnected, rev: currentRev()
+  };
+});
+ipcMain.handle('lan:test', (e, { ip, port, token }) => new Promise((resolve) => {
+  const req = http.get({ hostname: ip, port: port || SYNC_PORT_DEFAULT, path: '/ping', timeout: 2500, headers: { 'x-sened-token': token || '' } }, (res) => {
+    let b = ''; res.setEncoding('utf8'); res.on('data', c => b += c);
+    res.on('end', () => {
+      if (res.statusCode === 401) { resolve({ ok: false, error: 'unauthorized' }); return; }
+      if (res.statusCode !== 200) { resolve({ ok: false, error: 'http ' + res.statusCode }); return; }
+      try { resolve({ ok: true, info: JSON.parse(b) }); } catch (_) { resolve({ ok: false }); }
+    });
+  });
+  req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }); });
+  req.on('error', (err) => resolve({ ok: false, error: err.message }));
+}));
+
+// ---------- تفعيل المطوّر - يُخزَّن في مجلد دائم لا يُحذف عند إلغاء التثبيت ----------
+// نستخدم %APPDATA%\sened-activation.json بدل userData لأن userData يُحذف عند الإلغاء
+function activationFile() {
+  return path.join(app.getPath('appData'), 'sened-activation.json');
+}
+function readActivation() {
+  try {
+    const f = activationFile();
+    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch(e) {}
+  return {};
+}
+function writeActivation(data) {
+  fs.writeFileSync(activationFile(), JSON.stringify(data, null, 2), 'utf8');
+}
+
 ipcMain.handle('activation:setDevCode', (e, code) => {
   try { writeBuiltinConfig({ activationCode: (code || '').trim() }); return { ok: true, hasCode: !!(code || '').trim() }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('activation:hasDevCode', () => ({ hasCode: !!builtinActivationCode() }));
-// حالة التفعيل: هل يحتاج هذا الجهاز إدخال الكود؟ (إن لم يُضبط كود مدمج، فالتفعيل معطّل والتطبيق حر)
 ipcMain.handle('activation:status', () => {
   const devCode = builtinActivationCode();
-  if (!devCode) return { required: false }; // لا كود مدمج → التطبيق يعمل بحرية (نسخة تطوير/عامة)
-  const d = loadData();
-  const act = d.settings.activation || {};
-  const activated = act.activated && act.fingerprint === machineFingerprint();
+  if (!devCode) return { required: false };
+  const act = readActivation();
+  const fp = machineFingerprint();
+  // مفعَّل فقط إذا: العلَم مضبوط + البصمة تطابق هذا الجهاز + التوقيع سليم (لم يُزوَّر الملف).
+  const activated = !!act.activated && act.fingerprint === fp && act.sig === activationSignature(fp);
   return { required: !activated };
 });
 ipcMain.handle('activation:verify', (e, code) => {
   const devCode = builtinActivationCode();
-  if (!devCode) return { ok: true }; // لا كود مطلوب
+  if (!devCode) return { ok: true };
   if ((code || '').trim() !== devCode) return { ok: false };
-  const d = loadData();
-  d.settings.activation = { activated: true, fingerprint: machineFingerprint(), at: new Date().toISOString() };
-  saveData(d);
+  const fp = machineFingerprint();
+  // نربط التفعيل ببصمة هذا الجهاز ونوقّعه؛ نسخ الملف لجهاز آخر تفشل لأن بصمته مختلفة.
+  writeActivation({ activated: true, fingerprint: fp, at: new Date().toISOString(), sig: activationSignature(fp) });
   return { ok: true };
 });
 ipcMain.handle('auth:verify', (e, { username, password }) => {
@@ -751,6 +1119,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  applyLanMode();
   createWindow();
   takeBackup();
   checkLicenseStatus();

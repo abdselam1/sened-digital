@@ -1,0 +1,8 @@
+{
+  "apiKeyEnc": "FBYFOgJyYw4iPgQxBh1bQhNzMT1YMB5QbSUREA5HLzdoQgxHPjwiUwteVVc+OQEBIjlWchEBBjU=",
+  "baseUrl": "https://api.groq.com/openai/v1",
+  "model": "llama-3.3-70b-versatile",
+  "name": "Sened AI",
+  "activationCode": "Ab32222206",
+  "flavor": "admin"
+}

@@ -300,13 +300,68 @@
           </div>
           <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
         </div>
+
+        <div class="panel" id="lanPanel">
+          <h3 data-i18n="lanTitle"></h3>
+          <p class="muted" data-i18n="lanIntro" style="margin-bottom:10px"></p>
+          <div class="field">
+            <label data-i18n="lanRole"></label>
+            <select id="lanRoleSelect" onchange="onLanRoleChange()">
+              <option value="off" data-i18n="lanRoleOff"></option>
+              <option value="host" data-i18n="lanRoleHost"></option>
+              <option value="client" data-i18n="lanRoleClient"></option>
+            </select>
+          </div>
+          <div id="lanTokenBox" style="display:none;margin-top:10px">
+            <label data-i18n="lanTokenLabel"></label>
+            <input type="text" id="lanToken" data-i18n-ph="lanTokenPh" style="direction:ltr;text-align:left">
+            <p class="muted" data-i18n="lanTokenHint" style="margin:6px 0 0"></p>
+          </div>
+          <div id="lanHostBox" style="display:none;margin-top:10px;background:rgba(200,164,92,0.08);padding:14px;border-radius:8px;border:1px solid var(--gold)">
+            <p class="muted" data-i18n="lanHostHint" style="margin:0 0 6px"></p>
+            <div id="lanMyAddress" style="font-size:22px;font-weight:bold;color:var(--gold);direction:ltr;text-align:center">—</div>
+            <p class="muted" style="margin:8px 0 0"><span data-i18n="lanConnectedClients"></span>: <b id="lanClientCount">0</b></p>
+          </div>
+          <div id="lanClientBox" style="display:none;margin-top:10px">
+            <p class="muted" data-i18n="lanClientHint" style="margin:0 0 6px"></p>
+            <div style="display:flex;gap:10px">
+              <input type="text" id="lanHostIp" placeholder="192.168.1.10" style="flex:1;direction:ltr;text-align:left">
+              <button class="btn btn-ghost" onclick="testLanHost()" data-i18n="lanTestBtn"></button>
+            </div>
+            <p id="lanClientStatus" style="margin:8px 0 0"></p>
+          </div>
+          <div style="height:12px"></div>
+          <button class="btn btn-gold" onclick="saveLanConfig()" data-i18n="save"></button>
+        </div>
+
+        <div class="panel" id="deviceRolePanel">
+          <h3 data-i18n="deviceRoleTitle"></h3>
+          <p class="muted" data-i18n="deviceRoleIntro" style="margin-bottom:10px"></p>
+          <p class="muted" style="margin:0 0 10px">
+            <span data-i18n="deviceRoleCurrentLabel"></span>:
+            <b id="deviceRoleCurrent" style="color:var(--gold)">—</b>
+          </p>
+          <div class="field">
+            <label data-i18n="deviceRoleAssign"></label>
+            <select id="deviceRoleSelect">
+              <option value="" data-i18n="deviceRoleNone"></option>
+              <option value="manager" data-i18n="roleManager"></option>
+              <option value="accountant" data-i18n="roleAccountant"></option>
+              <option value="cashier" data-i18n="roleCashier"></option>
+            </select>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:12px">
+            <button class="btn btn-gold" onclick="saveDeviceRole()" data-i18n="save"></button>
+            <button class="btn btn-ghost" onclick="clearDeviceRole()" data-i18n="deviceRoleClear"></button>
+          </div>
+        </div>
+
         <div class="panel">
           <h3 data-i18n="companyInfo"></h3>
           <div class="grid2">
             <div class="field"><label data-i18n="address"></label><input id="setAddress"></div>
             <div class="field"><label data-i18n="phone"></label><input id="setPhone"></div>
-            <div class="field"><label data-i18n="companyRC"></label><input id="setRC"></div>
-            <div class="field"><label data-i18n="companyTaxId"></label><input id="setTaxId"></div>
+            <div class="field" style="grid-column: span 2"><label data-i18n="companyRC"></label><input id="setRC"></div>
           </div>
           <div class="field"><label data-i18n="note"></label><input id="setCompanyNotes"></div>
           <div class="field">
@@ -351,6 +406,15 @@
           <button class="btn btn-gold" onclick="saveBudgets()" data-i18n="save"></button>
         </div>
         <div class="panel">
+          <h3 data-i18n="aiSettings"></h3>
+          <p class="muted" data-i18n="aiKeyHint" style="margin-bottom:10px"></p>
+          <div class="field">
+            <label data-i18n="aiKeyLabel"></label>
+            <input id="setGroqKey" type="password" placeholder="gsk_..." style="direction:ltr;text-align:left" autocomplete="off">
+          </div>
+          <button class="btn btn-gold" onclick="saveAiKey()" data-i18n="save"></button>
+        </div>
+        <div class="panel">
           <h3 data-i18n="notifSettings"></h3>
           <label class="switch-row"><input type="checkbox" id="setNotifLowStock"><span data-i18n="lowStockNotif"></span></label>
           <div style="height:10px"></div>
@@ -370,13 +434,7 @@
           </div>
           <button class="btn btn-gold" onclick="saveSecurity()" data-i18n="save"></button>
         </div>
-        <div class="panel">
-          <h3 data-i18n="assistant"></h3>
-          <p class="muted" id="aiBuiltinStatus" style="margin-bottom:12px"></p>
-          <div class="field"><label data-i18n="groqKeyOptional"></label><input id="setGroqKey" type="password" placeholder="gsk_..."></div>
-          <p class="muted" data-i18n="groqKeyHelp" style="margin-bottom:10px"></p>
-          <button class="btn btn-gold btn-sm" onclick="saveGroqKey()" data-i18n="save"></button>
-        </div>
+
         <div class="panel">
           <h3 data-i18n="dataSection"></h3>
           <p class="muted" data-i18n="autoBackupInfo" style="margin-bottom:12px"></p>
@@ -414,50 +472,15 @@
             </div>
             <p class="muted" data-i18n="licenseHelpCustomer" style="margin-top:6px"></p>
           </div>
-          <div id="licAdminSetup">
-            <div class="field" style="margin-top:10px"><label data-i18n="githubToken"></label><input id="licGithubToken" type="password" placeholder="ghp_..."></div>
-            <button type="button" class="btn btn-gold btn-sm" onclick="createLicenseSystem()" data-i18n="createLicenseSystem"></button>
-          </div>
-          <div id="licAdminActive" class="hidden">
-            <p class="muted" id="licGistIdLabel"></p>
-            <div class="field" style="margin-top:10px">
-              <label data-i18n="claimCode"></label>
-              <div style="display:flex;gap:8px;align-items:center">
-                <code id="licClaimCode" style="background:var(--dark-tertiary);padding:8px 14px;border-radius:8px;font-size:1.1rem;letter-spacing:2px"></code>
-                <button type="button" class="btn btn-ghost btn-sm" onclick="regenClaimCode()" data-i18n="regenClaimCode"></button>
-              </div>
-              <p class="muted" style="margin-top:6px" data-i18n="claimInstructions"></p>
-            </div>
-            <p class="muted" data-i18n="adminCommandsHelp" style="margin-top:10px"></p>
-          </div>
-          <button type="button" class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="licenseCheckNowUi()" data-i18n="checkNow"></button>
-        </div>
-
-        <div class="panel">
-          <h3 data-i18n="sharedKeyTitle"></h3>
-          <p class="muted" data-i18n="sharedKeyHelp" style="margin-bottom:12px"></p>
-          <p class="muted" id="sharedKeyStatus" style="margin-bottom:10px"></p>
-          <div class="field"><label data-i18n="aiApiKey"></label><input id="sharedKeyInput" type="password" placeholder="gsk_..."></div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn btn-gold btn-sm" onclick="saveSharedKey()" data-i18n="saveSharedKey"></button>
-            <button class="btn btn-danger btn-sm" onclick="clearSharedKey()" data-i18n="clearSharedKey"></button>
-          </div>
-          <p class="muted" data-i18n="rebuildReminder" style="margin-top:10px;color:#e0b060"></p>
-        </div>
-
-        <div class="panel">
-          <h3 data-i18n="devActivationCode"></h3>
-          <p class="muted" data-i18n="devActivationHelp" style="margin-bottom:12px"></p>
-          <p class="muted" id="devActivationStatus" style="margin-bottom:10px"></p>
-          <div class="field"><label data-i18n="activationCodeLabel"></label><input id="devActivationInput" type="password"></div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn btn-gold btn-sm" onclick="saveDevActivationCode()" data-i18n="save"></button>
-            <button class="btn btn-danger btn-sm" onclick="clearDevActivationCode()" data-i18n="clearSharedKey"></button>
-          </div>
-          <p class="muted" data-i18n="rebuildReminder" style="margin-top:10px;color:#e0b060"></p>
         </div>
       </section>
     </main>
+
+    <!-- الزر العائم (فاتورة جديدة) -->
+    <button class="btn btn-gold" id="fabNewInvoice" onclick="closeCmdk(); goPage('invoices'); openInvoiceModal()" style="position:fixed;bottom:24px;left:24px;z-index:90;border-radius:50px;box-shadow:0 8px 16px rgba(224,176,96,0.3);padding:12px 24px;font-size:1.1rem;display:flex;align-items:center;gap:8px">
+      <span style="font-size:1.4rem;font-weight:bold">+</span>
+      <span data-i18n="newInvoice">فاتورة جديدة</span>
+    </button>
   </div>
 
   <!-- نافذة منبثقة عامة -->

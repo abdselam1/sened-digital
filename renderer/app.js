@@ -53,10 +53,21 @@ const bridge = window.sened || {
   activationStatus: async () => ({ required: false }),
   activationVerify: async () => ({ ok: true }),
   activationSetDevCode: async () => ({ ok: true }),
-  activationHasDevCode: async () => ({ hasCode: false })
+  activationHasDevCode: async () => ({ hasCode: false }),
+  appFlavor: async () => 'full',
+  cashierIp: async () => '127.0.0.1',
+  onSyncUpdated: () => {},
+  deviceRoleGet: async () => JSON.parse(localStorage.getItem('sened-devrole') || 'null') || { role: null, boundAt: '' },
+  deviceRoleSet: async (role) => { const v = { role, boundAt: new Date().toISOString() }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
+  deviceRoleClear: async () => { const v = { role: null, boundAt: '' }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
+  lanGetConfig: async () => ({ role: 'off', hostIp: '', port: 3050 }),
+  lanSetConfig: async () => ({ ok: true }),
+  lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', serverRunning: false, connectedClients: 0, clientConnected: false, rev: 0 }),
+  lanTest: async () => ({ ok: false, error: 'BROWSER' })
 };
 
 // ---------- الترجمة ----------
+
 function applyLang() {
   T = I18N[DB.settings.lang] || I18N.ar;
   document.documentElement.lang = DB.settings.lang;
@@ -103,11 +114,19 @@ function toast(msg) {
 
 // ---------- الدخول والقفل والصلاحيات ----------
 let currentRole = 'manager', currentUserName = 'admin';
+let APP_FLAVOR = 'full'; // 'admin' | 'cashier' | 'full' — تُقرأ من نكهة النسخة الموزّعة
+// قفل دور الجهاز: يُقرأ من الملف المحلي device-role.json عند الإقلاع.
+// null = الجهاز غير مربوط بعد؛ أول دخول بدور تشغيلي يربطه. المدير يتجاوز القفل دائماً.
+let deviceBoundRole = null;
 const PERMS = {
   manager: null, // null = كل الصفحات
   accountant: ['dashboard', 'invoices', 'quotations', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant'],
   cashier: ['dashboard', 'invoices', 'quotations', 'products', 'customers']
 };
+// الصفحة التي يُوجَّه إليها كل دور فور الدخول (الكاشير يبدأ من الفواتير مباشرةً)
+const LANDING = { manager: 'dashboard', accountant: 'dashboard', cashier: 'invoices' };
+// الاسم المترجَم للدور (يُستخدم في الرسائل ولوحة قفل الجهاز)
+function roleName(r) { return T['role' + r.charAt(0).toUpperCase() + r.slice(1)] || r; }
 
 function applyPermissions() {
   const allowed = PERMS[currentRole];
@@ -126,16 +145,33 @@ async function doLogin() {
   const u = $('loginUser').value.trim();
   const p = $('loginPass').value;
   const res = await bridge.authVerify(u, p);
-  if (res) {
-    currentRole = res.role || 'manager'; currentUserName = res.name || u;
-    $('loginScreen').classList.remove('open');
-    $('loginError').textContent = '';
-    $('appShell').classList.remove('hidden');
-    await startApp();
-    applyPermissions();
-  } else {
-    $('loginError').textContent = T.wrongLogin;
+  if (!res) { $('loginError').textContent = T.wrongLogin; return; }
+
+  let role = res.role || 'manager';
+  if (APP_FLAVOR === 'cashier') role = 'cashier'; // نسخة الكاشير لا ترفع الصلاحية أبداً
+
+  // قفل دور الجهاز: إن كان الجهاز مربوطاً بدور، لا يُقبل الدخول بدور مختلف.
+  // المدير وحده يتجاوز القفل (ليتمكن من الإدارة وإعادة تعيين الجهاز).
+  if (deviceBoundRole && role !== deviceBoundRole && role !== 'manager') {
+    $('loginError').textContent = (T.deviceRoleLocked || '').replace('{role}', roleName(deviceBoundRole));
+    return;
   }
+
+  currentRole = role; currentUserName = res.name || u;
+
+  // ربط الجهاز عند أول دخول بدور تشغيلي (محاسب/كاشير) فيبقى مقفلاً عليه دائماً.
+  // دخول المدير لا يربط الجهاز — يبقى المدير متنقلاً حراً ويعيّن الأجهزة يدوياً.
+  if (!deviceBoundRole && role !== 'manager') {
+    deviceBoundRole = role;
+    await bridge.deviceRoleSet(role);
+  }
+
+  $('loginScreen').classList.remove('open');
+  $('loginError').textContent = '';
+  $('appShell').classList.remove('hidden');
+  await startApp();
+  applyPermissions();
+  goPage(LANDING[currentRole] || 'dashboard');
 }
 
 function lockApp() {
@@ -721,7 +757,7 @@ function renderInvoices() {
 let invLines = [];
 function openInvoiceModal() {
   if (!DB.products.length) { toast(T.noData + ' — ' + T.addProduct); return; }
-  invLines = [{ productId: DB.products[0].id, qty: 1 }];
+  invLines = [{ productId: DB.products[0].id, qty: 1, price: DB.products[0].price }];
   openModal(`<h3>${T.newInvoice} #${DB.counters.invoice}</h3>
     <div class="field"><label>${T.customer}</label>
       <select id="mCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
@@ -732,7 +768,7 @@ function openInvoiceModal() {
     <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="invSubtotal">0</span> ${cur()}</p>
     <div class="grid2">
       <div class="field"><label>${T.discount}</label><input id="mDiscount" type="number" min="0" placeholder="0" oninput="drawInvLines()"></div>
-      <div class="field"><label>${T.taxPercent}</label><input id="mTax" type="number" min="0" max="100" placeholder="0" oninput="drawInvLines()"></div>
+
     </div>
     <h3>${T.grandTotal}: <span id="invTotal">0</span> ${cur()}</h3>
     <div class="grid2" style="margin-top:10px">
@@ -749,32 +785,53 @@ function openInvoiceModal() {
 
 function drawInvLines() {
   $('invLines').innerHTML = invLines.map((l, ix) => `
-    <div class="grid3" style="margin-bottom:8px">
-      <select onchange="invLines[${ix}].productId=this.value;drawInvLines()">
-        ${DB.products.map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)} — ${fmt(p.price)} (${p.stock})</option>`).join('')}
+    <div style="display:grid;grid-template-columns:2fr 1fr 1.2fr auto;gap:8px;margin-bottom:8px">
+      <select onchange="onInvProductChange(${ix}, this.value)">
+        ${DB.products.map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)} (${p.stock})</option>`).join('')}
       </select>
-      <input type="number" min="1" value="${l.qty}" onchange="invLines[${ix}].qty=Number(this.value)||1;drawInvLines()">
+      <input type="number" min="1" value="${l.qty}" onchange="invLines[${ix}].qty=Number(this.value)||1;drawInvLines()" title="${T.qty}">
+      <input type="number" min="0" step="0.01" value="${lineUnitPrice(l)}" onchange="invLines[${ix}].price=Number(this.value)||0;drawInvLines()" title="${T.price}">
       <button class="btn btn-danger btn-sm" onclick="invLines.splice(${ix},1);drawInvLines()">✕</button>
     </div>`).join('');
   $('invSubtotal').textContent = fmt(invSubtotal());
-  $('invTotal').textContent = fmt(invGrandTotal());
+  const newTotal = invGrandTotal();
+  $('invTotal').textContent = fmt(newTotal);
+  
+  // تحديث المبلغ المدفوع تلقائياً ليكون مساوياً للإجمالي لتفادي الديون الخاطئة
+  // يتم ذلك فقط إذا كان العنصر موجوداً في الواجهة
+  const paidInput = $('mPaid');
+  if (paidInput) {
+      paidInput.value = newTotal;
+  }
+}
+
+// سعر الوحدة للسطر: السعر المُعدّل يدوياً إن وُجد، وإلا سعر المنتج الافتراضي
+function lineUnitPrice(l) {
+  if (l.price != null && l.price !== '') return l.price;
+  const p = DB.products.find(x => x.id === l.productId);
+  return p ? p.price : 0;
+}
+
+// عند تغيير المنتج، أعد ضبط السعر لسعر المنتج الجديد (يبقى قابلاً للتعديل يدوياً)
+function onInvProductChange(ix, productId) {
+  invLines[ix].productId = productId;
+  const p = DB.products.find(x => x.id === productId);
+  invLines[ix].price = p ? p.price : 0;
+  drawInvLines();
 }
 
 function invSubtotal() {
-  return invLines.reduce((s, l) => {
-    const p = DB.products.find(x => x.id === l.productId);
-    return s + (p ? p.price * l.qty : 0);
-  }, 0);
+  return invLines.reduce((s, l) => s + lineUnitPrice(l) * l.qty, 0);
 }
 
 function invGrandTotal() {
   const discount = Math.max(0, Number(($('mDiscount') || {}).value || 0));
-  const taxPct = Math.max(0, Number(($('mTax') || {}).value || 0));
+  const taxPct = 0;
   const afterDiscount = Math.max(0, invSubtotal() - discount);
   return afterDiscount * (1 + taxPct / 100);
 }
 
-function addInvLine() { invLines.push({ productId: DB.products[0].id, qty: 1 }); drawInvLines(); }
+function addInvLine() { const p = DB.products[0]; invLines.push({ productId: p.id, qty: 1, price: p.price }); drawInvLines(); }
 
 function scanBarcodeAdd(code) {
   code = code.trim();
@@ -783,7 +840,7 @@ function scanBarcodeAdd(code) {
   if (!p) { toast(T.barcodeNotFound); return; }
   const line = invLines.find(l => l.productId === p.id);
   if (line) line.qty += 1;
-  else invLines.push({ productId: p.id, qty: 1 });
+  else invLines.push({ productId: p.id, qty: 1, price: p.price });
   drawInvLines();
 }
 
@@ -797,7 +854,8 @@ async function saveInvoice() {
   const cust = DB.customers.find(c => c.id === custId);
   const items = invLines.map(l => {
     const p = DB.products.find(x => x.id === l.productId);
-    return { name: p.name, price: p.price, cost: p.cost, qty: l.qty, total: p.price * l.qty };
+    const unit = lineUnitPrice(l);
+    return { name: p.name, price: unit, cost: p.cost, qty: l.qty, total: unit * l.qty };
   });
   invLines.forEach(l => {
     const p = DB.products.find(x => x.id === l.productId);
@@ -805,7 +863,7 @@ async function saveInvoice() {
   });
   const subtotal = invSubtotal();
   const discount = Math.max(0, Number($('mDiscount').value || 0));
-  const taxPercent = Math.max(0, Number($('mTax').value || 0));
+  const taxPercent = 0;
   const total = invGrandTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPaid').value || 0)));
   const invNumber = DB.counters.invoice++;
@@ -881,7 +939,7 @@ function buildInvoiceHtml(inv, kind) {
   const infoLines = [co.address, co.phone, co.rc ? `${T.companyRC}: ${co.rc}` : '', co.taxId ? `${T.companyTaxId}: ${co.taxId}` : ''].filter(Boolean);
   const subtotal = inv.subtotal ?? inv.total;
   const discount = inv.discount || 0;
-  const taxPercent = inv.taxPercent || 0;
+  const taxPercent = 0;
   const noLabel = kind === 'quote' ? T.quoteNo : T.invoiceNo;
   return `
     <div class="inv-doc tpl-${tpl}" style="--inv-accent:${color}">
@@ -896,7 +954,7 @@ function buildInvoiceHtml(inv, kind) {
       <div class="inv-totals-box">
         ${discount || taxPercent ? `<div class="inv-row"><span>${T.subtotal}</span><span>${fmt(subtotal)} ${cur()}</span></div>` : ''}
         ${discount ? `<div class="inv-row"><span>${T.discount}</span><span>-${fmt(discount)} ${cur()}</span></div>` : ''}
-        ${taxPercent ? `<div class="inv-row"><span>${T.taxPercent}</span><span>${fmt(taxPercent)}%</span></div>` : ''}
+        
         <div class="inv-total">${T.grandTotal}: ${fmt(inv.total)} ${cur()}</div>
         ${remaining > 0 ? `<div class="inv-total inv-remaining">${T.remaining}: ${fmt(remaining)} ${cur()}</div>` : ''}
       </div>
@@ -957,7 +1015,7 @@ function renderQuotes() {
 let quoteLines = [];
 function openQuoteModal() {
   if (!DB.products.length) { toast(T.noData + ' — ' + T.addProduct); return; }
-  quoteLines = [{ productId: DB.products[0].id, qty: 1 }];
+  quoteLines = [{ productId: DB.products[0].id, qty: 1, price: DB.products[0].price }];
   openModal(`<h3>${T.newQuotation} #${DB.counters.quote}</h3>
     <div class="field"><label>${T.customer}</label>
       <select id="mQCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
@@ -967,7 +1025,7 @@ function openQuoteModal() {
     <p class="muted" style="margin-top:12px">${T.subtotal}: <span id="quoteSubtotal">0</span> ${cur()}</p>
     <div class="grid2">
       <div class="field"><label>${T.discount}</label><input id="mQDiscount" type="number" min="0" placeholder="0" oninput="drawQuoteLines()"></div>
-      <div class="field"><label>${T.taxPercent}</label><input id="mQTax" type="number" min="0" max="100" placeholder="0" oninput="drawQuoteLines()"></div>
+
     </div>
     <h3>${T.grandTotal}: <span id="quoteTotal">0</span> ${cur()}</h3>
     <div class="modal-actions">
@@ -979,11 +1037,12 @@ function openQuoteModal() {
 
 function drawQuoteLines() {
   $('quoteLinesBox').innerHTML = quoteLines.map((l, ix) => `
-    <div class="grid3" style="margin-bottom:8px">
-      <select onchange="quoteLines[${ix}].productId=this.value;drawQuoteLines()">
+    <div style="display:grid;grid-template-columns:2fr 1fr 1.2fr auto;gap:8px;margin-bottom:8px">
+      <select onchange="quoteLines[${ix}].productId=this.value; quoteLines[${ix}].price = DB.products.find(x=>x.id===this.value)?.price||0; drawQuoteLines()">
         ${DB.products.map(p => `<option value="${p.id}" ${p.id === l.productId ? 'selected' : ''}>${esc(p.name)} — ${fmt(p.price)}</option>`).join('')}
       </select>
       <input type="number" min="1" value="${l.qty}" onchange="quoteLines[${ix}].qty=Number(this.value)||1;drawQuoteLines()">
+      <input type="number" min="0" step="0.01" value="${l.price != null ? l.price : DB.products.find(x=>x.id===l.productId)?.price||0}" onchange="quoteLines[${ix}].price=Number(this.value)||0;drawQuoteLines()">
       <button class="btn btn-danger btn-sm" onclick="quoteLines.splice(${ix},1);drawQuoteLines()">✕</button>
     </div>`).join('');
   $('quoteSubtotal').textContent = fmt(quoteSubtotal());
@@ -992,19 +1051,19 @@ function drawQuoteLines() {
 
 function quoteSubtotal() {
   return quoteLines.reduce((s, l) => {
-    const p = DB.products.find(x => x.id === l.productId);
-    return s + (p ? p.price * l.qty : 0);
+    const price = l.price != null ? l.price : (DB.products.find(x => x.id === l.productId)?.price || 0);
+    return s + (price * l.qty);
   }, 0);
 }
 
 function quoteGrandTotal() {
   const discount = Math.max(0, Number(($('mQDiscount') || {}).value || 0));
-  const taxPct = Math.max(0, Number(($('mQTax') || {}).value || 0));
+  const taxPct = 0;
   const afterDiscount = Math.max(0, quoteSubtotal() - discount);
   return afterDiscount * (1 + taxPct / 100);
 }
 
-function addQuoteLine() { quoteLines.push({ productId: DB.products[0].id, qty: 1 }); drawQuoteLines(); }
+function addQuoteLine() { quoteLines.push({ productId: DB.products[0].id, qty: 1, price: DB.products[0].price }); drawQuoteLines(); }
 
 async function saveQuote() {
   if (!quoteLines.length) return;
@@ -1012,11 +1071,12 @@ async function saveQuote() {
   const cust = DB.customers.find(c => c.id === custId);
   const items = quoteLines.map(l => {
     const p = DB.products.find(x => x.id === l.productId);
-    return { name: p.name, price: p.price, cost: p.cost, qty: l.qty, total: p.price * l.qty };
+    const price = l.price != null ? l.price : p.price;
+    return { name: p.name, price: price, cost: p.cost, qty: l.qty, total: price * l.qty };
   });
   const subtotal = quoteSubtotal();
   const discount = Math.max(0, Number($('mQDiscount').value || 0));
-  const taxPercent = Math.max(0, Number($('mQTax').value || 0));
+  const taxPercent = 0;
   const total = quoteGrandTotal();
   DB.quotes = DB.quotes || [];
   const quoteNumber = DB.counters.quote++;
@@ -1799,22 +1859,108 @@ function fillSettings() {
   $('setAddress').value = co.address || '';
   $('setPhone').value = co.phone || '';
   $('setRC').value = co.rc || '';
-  $('setTaxId').value = co.taxId || '';
   $('setCompanyNotes').value = co.notes || '';
   updateLogoPreview(co.logoDataUrl || '');
+  if ($('setGroqKey')) $('setGroqKey').value = DB.settings.groqKey || '';
   const nf = DB.settings.notifications || {};
   $('setNotifLowStock').checked = nf.lowStock !== false;
   $('setNotifWeekly').checked = nf.weeklyReport !== false;
   fillBudgetInputs();
   renderCurrenciesList();
   fillLicensePanel();
-  renderAiProviders();
-  renderSharedKeyStatus();
-  renderDevActivationStatus();
   const iv = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
   $('setInvTemplate').value = iv.template || 'classic';
   $('setInvColor').value = iv.color || '#C8A45C';
   updateInvoiceDesignPreview();
+
+  // قسم التزامن عبر الشبكة المحلية (LAN)
+  refreshLanUI();
+  // قسم قفل دور الجهاز
+  refreshDeviceRoleUI();
+}
+
+// ---------- التزامن عبر الشبكة المحلية (LAN) ----------
+// إعداد الشبكة محلي لكل جهاز (يُقرأ عبر IPC) ولا يُخزَّن ضمن بيانات التطبيق المزامَنة.
+async function refreshLanUI() {
+  if (!$('lanRoleSelect')) return;
+  try {
+    const cfg = await bridge.lanGetConfig();
+    $('lanRoleSelect').value = cfg.role || 'off';
+    if ($('lanHostIp')) $('lanHostIp').value = cfg.hostIp || '';
+    if ($('lanToken')) $('lanToken').value = cfg.token || '';
+    onLanRoleChange();
+    const st = await bridge.lanStatus();
+    if ($('lanMyAddress')) {
+      const ip = st.myIp && st.myIp !== '127.0.0.1' ? st.myIp : null;
+      $('lanMyAddress').textContent = ip ? `${ip}:${st.port}` : (T.lanNoNetwork || '—');
+    }
+    if ($('lanClientCount')) $('lanClientCount').textContent = st.connectedClients || 0;
+    if ($('lanClientStatus') && cfg.role === 'client') {
+      $('lanClientStatus').textContent = st.clientConnected ? ('✓ ' + (T.lanConnected || '')) : ('… ' + (T.lanConnecting || ''));
+      $('lanClientStatus').style.color = st.clientConnected ? 'var(--gold)' : 'var(--muted)';
+    }
+  } catch (e) { /* الواجهة قد تُفتح قبل جاهزية الجسر */ }
+}
+
+function onLanRoleChange() {
+  const role = $('lanRoleSelect') ? $('lanRoleSelect').value : 'off';
+  if ($('lanHostBox')) $('lanHostBox').style.display = role === 'host' ? 'block' : 'none';
+  if ($('lanClientBox')) $('lanClientBox').style.display = role === 'client' ? 'block' : 'none';
+  // رمز الحماية المشترك يظهر للمضيف والعميل معاً (يجب أن يتطابق على كل الأجهزة)
+  if ($('lanTokenBox')) $('lanTokenBox').style.display = role === 'off' ? 'none' : 'block';
+}
+
+async function saveLanConfig() {
+  const role = $('lanRoleSelect').value;
+  const hostIp = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
+  const token = $('lanToken') ? $('lanToken').value.trim() : '';
+  await bridge.lanSetConfig({ role, hostIp, token });
+  toast(T.saved);
+  if (role === 'client' && hostIp) { DB = await bridge.loadData(); renderAll(); }
+  setTimeout(refreshLanUI, 500);
+}
+
+// ---------- قفل دور الجهاز (إدارة المدير فقط) ----------
+// يعرض الدور المربوط حالياً على هذا الجهاز، ويتيح للمدير إعادة تعيينه أو فكّه.
+async function refreshDeviceRoleUI() {
+  if (!$('deviceRoleSelect')) return;
+  try {
+    const cur = (await bridge.deviceRoleGet()).role;
+    deviceBoundRole = cur;
+    $('deviceRoleCurrent').textContent = cur ? roleName(cur) : (T.deviceRoleNone || '—');
+    $('deviceRoleSelect').value = cur || '';
+  } catch (e) { /* الجسر قد لا يكون جاهزاً بعد */ }
+}
+
+async function saveDeviceRole() {
+  if (currentRole !== 'manager') { toast(T.accessDenied); return; }
+  const val = $('deviceRoleSelect').value;
+  const res = val ? await bridge.deviceRoleSet(val) : await bridge.deviceRoleClear();
+  deviceBoundRole = res.role;
+  toast(T.saved);
+  refreshDeviceRoleUI();
+}
+
+async function clearDeviceRole() {
+  if (currentRole !== 'manager') { toast(T.accessDenied); return; }
+  const res = await bridge.deviceRoleClear();
+  deviceBoundRole = res.role;
+  toast(T.saved);
+  refreshDeviceRoleUI();
+}
+
+async function testLanHost() {
+  const ip = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
+  if (!ip) return;
+  const token = $('lanToken') ? $('lanToken').value.trim() : '';
+  if ($('lanClientStatus')) { $('lanClientStatus').textContent = '… ' + (T.lanTesting || ''); $('lanClientStatus').style.color = 'var(--muted)'; }
+  const r = await bridge.lanTest(ip, undefined, token);
+  if ($('lanClientStatus')) {
+    const msg = r.ok ? ('✓ ' + (T.lanReachable || ''))
+      : (r.error === 'unauthorized' ? ('✗ ' + (T.lanTokenWrong || '')) : ('✗ ' + (T.lanUnreachable || '')));
+    $('lanClientStatus').textContent = msg;
+    $('lanClientStatus').style.color = r.ok ? 'var(--gold)' : '#e0607a';
+  }
 }
 
 function sampleInvoiceForPreview() {
@@ -1864,32 +2010,6 @@ function copyDeviceId() {
   navigator.clipboard.writeText(id).then(() => toast(T.copied));
 }
 
-async function createLicenseSystem() {
-  const token = $('licGithubToken').value.trim();
-  if (!token) return;
-  const res = await bridge.licenseCreateGist(token);
-  if (res.ok) {
-    DB = await bridge.loadData();
-    fillLicensePanel();
-    toast(T.saved);
-  } else {
-    toast('⚠️ ' + (res.error || ''));
-  }
-}
-
-async function regenClaimCode() {
-  const code = await bridge.licenseRegenClaimCode();
-  DB = await bridge.loadData();
-  fillLicensePanel();
-  toast(code);
-}
-
-async function licenseCheckNowUi() {
-  await bridge.licenseCheckNow();
-  DB = await bridge.loadData();
-  toast(T.checkNow + ' ✓');
-}
-
 function applyLicenseLock(locked, message) {
   if (locked) {
     $('licenseLockMsg').textContent = message || T.lockedBody;
@@ -1910,65 +2030,6 @@ async function doActivate() {
   } else {
     $('activationError').textContent = T.activationWrong;
   }
-}
-
-async function renderDevActivationStatus() {
-  const info = await bridge.activationHasDevCode();
-  const el = $('devActivationStatus');
-  if (el) el.textContent = info.hasCode ? T.devActivationSet : T.devActivationNone;
-}
-
-async function saveDevActivationCode() {
-  const code = $('devActivationInput').value.trim();
-  if (!code) return;
-  await bridge.activationSetDevCode(code);
-  $('devActivationInput').value = '';
-  renderDevActivationStatus();
-  toast(T.saved);
-}
-
-async function clearDevActivationCode() {
-  if (!confirm(T.confirmDelete)) return;
-  await bridge.activationSetDevCode('');
-  renderDevActivationStatus();
-}
-
-// ---------- المساعد الذكي (Groq فقط) ----------
-const GROQ = { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' };
-
-// حالة المساعد في الإعدادات + تعبئة مفتاح Groq الخاص بالزبون (إن وُجد)
-async function renderAiProviders() {
-  const info = await bridge.aiBuiltinInfo();
-  const el = $('aiBuiltinStatus');
-  const hasOwn = !!(DB.settings.groqKey);
-  if (el) el.textContent = (info.present || hasOwn) ? `✓ ${T.aiBuiltinActive}` : T.aiNoBuiltin;
-  if ($('setGroqKey')) $('setGroqKey').value = DB.settings.groqKey || '';
-}
-
-async function saveGroqKey() {
-  DB.settings.groqKey = $('setGroqKey').value.trim();
-  await persist(); renderAiProviders(); checkAI(); toast(T.saved);
-}
-
-// ---------- المفتاح المشترك المدمج (المطوّر فقط) ----------
-async function renderSharedKeyStatus() {
-  const info = await bridge.aiBuiltinInfo();
-  const el = $('sharedKeyStatus');
-  if (el) el.textContent = info.present ? `${T.sharedKeyActive} (${info.name})` : T.sharedKeyNone;
-}
-
-async function saveSharedKey() {
-  const key = $('sharedKeyInput').value.trim();
-  if (!key) return;
-  const res = await bridge.aiSetBuiltinKey({ name: 'Sened AI', baseUrl: GROQ.baseUrl, apiKey: key, model: GROQ.model });
-  if (res.ok) { $('sharedKeyInput').value = ''; renderSharedKeyStatus(); toast(T.saved); }
-  else toast('⚠️ ' + (res.error || ''));
-}
-
-async function clearSharedKey() {
-  if (!confirm(T.confirmDelete)) return;
-  await bridge.aiSetBuiltinKey({});
-  renderSharedKeyStatus();
 }
 
 function renderCurrenciesList() {
@@ -2019,11 +2080,17 @@ async function saveSettings() {
   DB.settings.businessName = $('setBiz').value.trim() || 'سند';
   DB.settings.company = {
     address: $('setAddress').value.trim(), phone: $('setPhone').value.trim(),
-    rc: $('setRC').value.trim(), taxId: $('setTaxId').value.trim(),
+    rc: $('setRC').value.trim(),
     notes: $('setCompanyNotes').value.trim(), logoDataUrl: (DB.settings.company && DB.settings.company.logoDataUrl) || ''
   };
   DB.settings.notifications = { ...DB.settings.notifications, lowStock: $('setNotifLowStock').checked, weeklyReport: $('setNotifWeekly').checked };
   await persist(); applyLang(); renderAll(); checkAI(); toast(T.saved);
+}
+
+// مفتاح ذكاء اصطناعي خاص بالزبون: إن ضُبط، يتقدّم على المفتاح المشترك المدمج (activeGroqKey في main.js)
+async function saveAiKey() {
+  DB.settings.groqKey = $('setGroqKey').value.trim();
+  await persist(); checkAI(); toast(T.saved);
 }
 
 function updateLogoPreview(dataUrl) {
@@ -2217,18 +2284,47 @@ async function bootAfterActivation() {
   const lic = DB.settings.license || {};
   if (lic.locked) applyLicenseLock(true, lic.message);
 
+  // نسخة الكاشير: تبدأ مباشرةً بصلاحية كاشير مقيّدة، بلا شاشة دخول ولا إمكانية رفع الصلاحية
+  if (APP_FLAVOR === 'cashier') {
+    currentRole = 'cashier'; currentUserName = T.roleCashier || 'كاشير';
+    $('appShell').classList.remove('hidden');
+    await startApp();
+    applyPermissions();
+    return;
+  }
+
   if (DB.settings.auth && DB.settings.auth.enabled) {
     $('loginUser').value = DB.settings.auth.username || '';
     $('loginScreen').classList.add('open');
   } else {
+    // بلا شاشة دخول: إن كان الجهاز مربوطاً بدور تشغيلي نلتزم به فلا يظهر إلا واجهته.
+    if (deviceBoundRole) { currentRole = deviceBoundRole; currentUserName = roleName(deviceBoundRole); }
     $('appShell').classList.remove('hidden');
     await startApp();
     applyPermissions();
+    goPage(LANDING[currentRole] || 'dashboard');
   }
+}
+
+// التحديث اللحظي: يُستدعى عندما يبثّ المضيف تغييراً (أو يتصل/ينفصل جهاز).
+// نعيد تحميل البيانات ونرسم الصفحة، مع تجنّب مقاطعة نافذة منبثقة مفتوحة.
+let _syncBusy = false;
+async function onRemoteSync() {
+  if (_syncBusy) return;
+  _syncBusy = true;
+  try {
+    DB = await bridge.loadData();
+    const modalOpen = $('modalBg') && $('modalBg').classList.contains('open');
+    if (!modalOpen) renderAll();
+    refreshLanUI();
+  } catch (e) { /* تجاهل */ } finally { _syncBusy = false; }
 }
 
 (async function init() {
   DB = await bridge.loadData();
+  APP_FLAVOR = await bridge.appFlavor();
+  deviceBoundRole = (await bridge.deviceRoleGet()).role;
+  bridge.onSyncUpdated(onRemoteSync);
   applyLang();
   applyTheme();
   fillSettings();
