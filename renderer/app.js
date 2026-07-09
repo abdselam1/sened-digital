@@ -225,6 +225,10 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
     e.preventDefault(); openCmdk(); return;
   }
+  // Ctrl+Shift+U: مفتاح نجاة المدير — إدخال كود المطوّر لفكّ قفل دور الجهاز من أي واجهة (حتى بلا تسجيل دخول)
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'u' || e.key === 'U')) {
+    e.preventDefault(); openDeviceUnlock(); return;
+  }
   // Ctrl+N: فاتورة جديدة سريعة
   if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
     e.preventDefault();
@@ -2016,6 +2020,34 @@ function applyLicenseLock(locked, message) {
     $('licenseLockScreen').classList.add('open');
   } else {
     $('licenseLockScreen').classList.remove('open');
+  }
+}
+
+// ---------- مفتاح نجاة المدير: فكّ قفل دور الجهاز بكود المطوّر من أي واجهة ----------
+// يعالج حالة: جهاز بلا تسجيل دخول ومربوط بدور محاسب/كاشير، فلا يصل صاحبه للإعدادات لإعادة التعيين.
+function openDeviceUnlock() {
+  openModal(`<h3>${T.devUnlockTitle}</h3>
+    <p class="muted">${T.devUnlockBody}</p>
+    <div class="field" style="margin-top:12px"><input id="devUnlockInput" type="password" onkeydown="if(event.key==='Enter')submitDeviceUnlock()" autocomplete="off"></div>
+    <div class="auth-error" id="devUnlockError"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="submitDeviceUnlock()">${T.deviceRoleClear}</button>
+    </div>`);
+  setTimeout(() => { if ($('devUnlockInput')) $('devUnlockInput').focus(); }, 20);
+}
+
+async function submitDeviceUnlock() {
+  const code = $('devUnlockInput').value;
+  const res = await bridge.activationVerify(code); // يتحقق من كود المطوّر (لا يغيّر شيئاً إن كان خطأً)
+  if (res && res.ok) {
+    await bridge.deviceRoleClear();
+    deviceBoundRole = null;
+    closeModal();
+    toast(T.saved);
+    setTimeout(() => location.reload(), 400);
+  } else {
+    if ($('devUnlockError')) $('devUnlockError').textContent = T.devUnlockWrong;
   }
 }
 

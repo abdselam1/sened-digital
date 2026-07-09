@@ -46,6 +46,9 @@
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false
     },
+    "portable": {
+      "artifactName": "Sened-Portable-${version}.exe"
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
