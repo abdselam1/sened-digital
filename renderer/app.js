@@ -64,45 +64,61 @@ const bridge = window.sened || {
   lanSetConfig: async () => ({ ok: true }),
   lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', deviceName: '', token: '', serverRunning: false, connectedClients: 0, clientNames: [], clientConnected: false, rev: 0 }),
   lanTest: async () => ({ ok: false, error: 'BROWSER' }),
-  lanDiscover: async () => []
+  lanDiscover: async () => [],
+  onSyncPostFailed: () => {},
+  uiPrefsGet: async () => JSON.parse(localStorage.getItem('sened-uiprefs') || 'null') || { lang: '', theme: '' },
+  uiPrefsSet: async (p) => {
+    const next = JSON.parse(localStorage.getItem('sened-uiprefs') || 'null') || { lang: '', theme: '' };
+    ['lang', 'theme'].forEach(k => { if (p && p[k] !== undefined) next[k] = p[k]; });
+    localStorage.setItem('sened-uiprefs', JSON.stringify(next));
+    return next;
+  }
 };
+
+// تفضيلات العرض المحلية لهذا الجهاز (لغة/سمة) — تُخزَّن محلياً (ui-prefs.json) خارج البيانات
+// المزامَنة، وإلا لقلب تغييرُ المحاسب للغة واجهاتِ كل الأجهزة. فارغة = استعمل المشترك (توافق رجعي).
+let UI_PREFS = { lang: '', theme: '' };
+const effLang = () => UI_PREFS.lang || DB.settings.lang || 'ar';
+const effTheme = () => UI_PREFS.theme || DB.settings.theme || 'dark';
 
 // ---------- الترجمة ----------
 
 function applyLang() {
-  T = I18N[DB.settings.lang] || I18N.ar;
-  document.documentElement.lang = DB.settings.lang;
+  const lang = effLang();
+  T = I18N[lang] || I18N.ar;
+  document.documentElement.lang = lang;
   document.documentElement.dir = T.dir;
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = T[el.dataset.i18n] || el.dataset.i18n; });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = T[el.dataset.i18nPh] || ''; });
   $('brandName').textContent = DB.settings.businessName || T.appName;
   applyThemeLabel();
-  document.querySelectorAll('.lang-switch button').forEach(b => b.classList.toggle('active', b.dataset.lang === DB.settings.lang));
+  document.querySelectorAll('.lang-switch button').forEach(b => b.classList.toggle('active', b.dataset.lang === lang));
 }
 
+// أزرار اللغة العلوية تغيّر لغة هذا الجهاز فقط (تفضيل محلي) — لا تمسّ الإعداد المشترك المزامَن
 async function switchLanguage(lang) {
-  if (DB.settings.lang === lang) return;
-  DB.settings.lang = lang;
-  await persist();
+  if (effLang() === lang) return;
+  UI_PREFS.lang = lang;
+  try { await bridge.uiPrefsSet({ lang }); } catch (e) {}
   applyLang();
-  if ($('setLang')) $('setLang').value = lang;
   renderAll();
   checkAI();
 }
 
-// ---------- المظهر (ليلي/نهاري) ----------
+// ---------- المظهر (ليلي/نهاري) — تفضيل محلي لهذا الجهاز مثل اللغة ----------
 function applyTheme() {
-  document.documentElement.setAttribute('data-theme', DB.settings.theme === 'light' ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', effTheme() === 'light' ? 'light' : 'dark');
   applyThemeLabel();
 }
 function applyThemeLabel() {
-  const isLight = DB.settings.theme === 'light';
+  const isLight = effTheme() === 'light';
   $('themeLabel').textContent = isLight ? T.themeLight : T.themeDark;
   $('themeBtn').querySelector('.ic').textContent = isLight ? '☀' : '☾';
 }
 async function toggleTheme() {
-  DB.settings.theme = DB.settings.theme === 'light' ? 'dark' : 'light';
-  await persist(); applyTheme();
+  UI_PREFS.theme = effTheme() === 'light' ? 'dark' : 'light';
+  try { await bridge.uiPrefsSet({ theme: UI_PREFS.theme }); } catch (e) {}
+  applyTheme();
 }
 
 async function persist() { await bridge.saveData(DB); }
@@ -121,8 +137,9 @@ let APP_FLAVOR = 'full'; // 'admin' | 'cashier' | 'full' — تُقرأ من ن�
 let deviceBoundRole = null;
 const PERMS = {
   manager: null, // null = كل الصفحات
-  accountant: ['dashboard', 'invoices', 'quotations', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant'],
-  cashier: ['dashboard', 'invoices', 'quotations', 'products', 'customers']
+  // صفحة «الاتصال بالشبكة» (network) متاحة لكل الأدوار: بدونها لا يستطيع المحاسب/الكاشير ربط جهازه بالخادم
+  accountant: ['dashboard', 'invoices', 'quotations', 'purchases', 'products', 'customers', 'suppliers', 'debts', 'wallets', 'expenses', 'reports', 'assistant', 'network'],
+  cashier: ['dashboard', 'invoices', 'quotations', 'products', 'customers', 'network']
 };
 // الصفحة التي يُوجَّه إليها كل دور فور الدخول (الكاشير يبدأ من الفواتير مباشرةً)
 const LANDING = { manager: 'dashboard', accountant: 'dashboard', cashier: 'invoices' };
@@ -137,9 +154,24 @@ function applyPermissions() {
   });
   const label = $('currentUserLabel');
   if (label) label.textContent = `${currentUserName} — ${T['role' + currentRole.charAt(0).toUpperCase() + currentRole.slice(1)] || currentRole}`;
+  applyLanHostOptionVisibility();
   // إن كانت الصفحة الحالية غير مسموحة، ارجع للوحة التحكم
   const activePage = document.querySelector('.page.active');
   if (activePage && allowed && !allowed.includes(activePage.id.replace('page-', ''))) goPage('dashboard');
+}
+
+// خيار «الخادم الرئيسي (المضيف)» حكر على المدير — غير المدير يرى فقط: بدون شبكة / جهاز متصل.
+// الإخفاء هنا للعرض، والفرض الفعلي عند نقطة الحفظ في saveLanConfig.
+function applyLanHostOptionVisibility() {
+  const sel = $('lanRoleSelect');
+  if (!sel) return;
+  const hostOpt = sel.querySelector('option[value="host"]');
+  if (hostOpt) {
+    const isManager = currentRole === 'manager';
+    hostOpt.hidden = !isManager;
+    hostOpt.disabled = !isManager;
+    if (!isManager && sel.value === 'host') { sel.value = 'off'; onLanRoleChange(); }
+  }
 }
 
 async function doLogin() {
@@ -208,6 +240,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
     item.classList.add('active');
     $('page-' + item.dataset.page).classList.add('active');
     renderAll();
+    // صفحة الاتصال بالشبكة: حدّث حالة اللوحة عند كل فتح (العنوان، الحالة، الأجهزة المتصلة)
+    if (item.dataset.page === 'network') refreshLanUI();
   });
 });
 
@@ -266,6 +300,7 @@ function cmdkActionList() {
     { page: 'wallets', icon: '◆', label: T.addWallet, action: () => { closeCmdk(); goPage('wallets'); openWalletModal(); } },
     { page: 'expenses', icon: '▽', label: T.addExpense, action: () => { closeCmdk(); goPage('expenses'); openExpenseModal(); } },
     { page: 'assistant', icon: '✦', label: T.assistant, action: () => { closeCmdk(); goPage('assistant'); } },
+    { page: 'network', icon: '⇌', label: T.networkPage, action: () => { closeCmdk(); goPage('network'); } },
     { page: 'settings', icon: '⚙', label: T.settings, action: () => { closeCmdk(); goPage('settings'); } },
     { page: null, icon: '▦', label: T.calculator, action: () => { closeCmdk(); openCalculator(); } },
     { page: 'dashboard', icon: '◈', label: T.dashboard, action: () => { closeCmdk(); goPage('dashboard'); } }
@@ -1912,6 +1947,7 @@ async function refreshLanUI() {
     updateSyncBadge(cfg, st);
     if (!$('lanRoleSelect')) return;
     $('lanRoleSelect').value = cfg.role || 'off';
+    applyLanHostOptionVisibility();
     if ($('lanHostIp')) $('lanHostIp').value = cfg.hostIp || '';
     if ($('lanDeviceName')) $('lanDeviceName').value = cfg.deviceName || '';
     // كود الاقتران: العميل يكتبه؛ المضيف يراه معروضاً (يتولّد تلقائياً عند الحفظ)
@@ -1959,6 +1995,8 @@ function onLanRoleChange() {
 
 async function saveLanConfig() {
   const role = $('lanRoleSelect').value;
+  // فرض الصلاحية عند نقطة الحفظ (لا إخفاء CSS فقط): وضع المضيف حكر على المدير
+  if (role === 'host' && currentRole !== 'manager') { toast(T.accessDenied); return; }
   const hostIp = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
   const deviceName = $('lanDeviceName') ? $('lanDeviceName').value.trim() : '';
   // المضيف يحتفظ بكوده الحالي (يتولّد في العملية الرئيسية إن كان فارغاً)؛ العميل يرسل ما كتبه
@@ -2430,7 +2468,11 @@ async function onRemoteSync() {
   DB = await bridge.loadData();
   APP_FLAVOR = await bridge.appFlavor();
   deviceBoundRole = (await bridge.deviceRoleGet()).role;
+  // تفضيلات العرض المحلية (لغة/سمة هذا الجهاز): إن لم توجد يُستعمل الإعداد المشترك
+  try { const p = await bridge.uiPrefsGet(); UI_PREFS = { lang: p.lang || '', theme: p.theme || '' }; } catch (e) {}
   bridge.onSyncUpdated(onRemoteSync);
+  // تنبيه واضح عند فشل وصول تعديل للخادم (بدل الفشل الصامت في السجل فقط)
+  bridge.onSyncPostFailed(() => toast(T.syncPostFailed));
   // مؤشر التزامن في الشريط الجانبي: تحديث دوري خفيف حتى خارج صفحة الإعدادات
   setInterval(async () => {
     try { const cfg = await bridge.lanGetConfig(); lanDeviceName = cfg.deviceName || ''; updateSyncBadge(cfg, await bridge.lanStatus()); } catch (e) {}

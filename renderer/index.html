@@ -97,6 +97,7 @@
         <div class="nav-item" data-page="reports"><span class="ic">◫</span><span data-i18n="reports"></span></div>
         <div class="nav-item" data-page="assistant"><span class="ic">✦</span><span data-i18n="assistant"></span></div>
         <div class="nav-item" data-page="telegram"><span class="ic">➤</span><span data-i18n="telegram"></span></div>
+        <div class="nav-item" data-page="network"><span class="ic">⇌</span><span data-i18n="networkPage"></span></div>
         <div class="nav-item" data-page="settings"><span class="ic">⚙</span><span data-i18n="settings"></span></div>
         <div class="nav-item" data-page="admin"><span class="ic">⚡</span><span data-i18n="management"></span></div>
       </nav>
@@ -108,8 +109,8 @@
         <button class="foot-btn" onclick="lockApp()"><span class="ic">🔒</span><span data-i18n="lock"></span></button>
         <button class="foot-btn" onclick="logoutApp()"><span class="ic">⏻</span><span data-i18n="logout"></span></button>
         <div class="ai-badge"><span class="dot" id="aiDot"></span><span id="aiStatus"></span></div>
-        <!-- مؤشر حالة التزامن عبر الشبكة: يظهر فقط عند تفعيل وضع مضيف/متصل -->
-        <div class="ai-badge" id="syncBadge" style="display:none"><span class="dot" id="syncDot"></span><span id="syncStatusText"></span></div>
+        <!-- مؤشر حالة التزامن عبر الشبكة: يظهر فقط عند تفعيل وضع مضيف/متصل — النقر يفتح صفحة الاتصال بالشبكة -->
+        <div class="ai-badge" id="syncBadge" style="display:none;cursor:pointer" onclick="goPage('network')"><span class="dot" id="syncDot"></span><span id="syncStatusText"></span></div>
       </div>
     </aside>
 
@@ -285,24 +286,9 @@
         <div id="tgBotsList"></div>
       </section>
 
-      <!-- الإعدادات -->
-      <section class="page" id="page-settings">
-        <div class="page-head"><h2 class="page-title" data-i18n="settings"></h2></div>
-        <div class="panel">
-          <div class="grid2">
-            <div class="field"><label data-i18n="language"></label>
-              <select id="setLang">
-                <option value="ar">العربية</option>
-                <option value="fr">Français</option>
-                <option value="en">English</option>
-              </select>
-            </div>
-            <div class="field"><label data-i18n="currency"></label><input id="setCurrency"></div>
-            <div class="field"><label data-i18n="businessName"></label><input id="setBiz"></div>
-          </div>
-          <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
-        </div>
-
+      <!-- الاتصال بالشبكة — متاحة لكل الأدوار (المحاسب/الكاشير يربطان جهازيهما بالخادم من هنا) -->
+      <section class="page" id="page-network">
+        <div class="page-head"><h2 class="page-title" data-i18n="networkPage"></h2></div>
         <div class="panel" id="lanPanel">
           <h3 data-i18n="lanTitle"></h3>
           <p class="muted" data-i18n="lanIntro" style="margin-bottom:10px"></p>
@@ -343,6 +329,32 @@
           </div>
           <div style="height:12px"></div>
           <button class="btn btn-gold" onclick="saveLanConfig()" data-i18n="save"></button>
+        </div>
+      </section>
+
+      <!-- الإعدادات -->
+      <section class="page" id="page-settings">
+        <div class="page-head"><h2 class="page-title" data-i18n="settings"></h2></div>
+        <div class="panel">
+          <div class="grid2">
+            <div class="field"><label data-i18n="language"></label>
+              <select id="setLang">
+                <option value="ar">العربية</option>
+                <option value="fr">Français</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div class="field"><label data-i18n="currency"></label><input id="setCurrency"></div>
+            <div class="field"><label data-i18n="businessName"></label><input id="setBiz"></div>
+          </div>
+          <button class="btn btn-gold" onclick="saveSettings()" data-i18n="save"></button>
+        </div>
+
+        <!-- إعداد الشبكة انتقل لصفحة «الاتصال بالشبكة» المتاحة لكل الأدوار -->
+        <div class="panel">
+          <h3 data-i18n="lanTitle"></h3>
+          <p class="muted" data-i18n="lanMovedHint" style="margin-bottom:10px"></p>
+          <button class="btn btn-gold" onclick="goPage('network')" data-i18n="networkPage"></button>
         </div>
 
         <div class="panel" id="deviceRolePanel">

@@ -136,6 +136,33 @@ function writeDeviceRole(role) {
   return next;
 }
 
+// ==========================================================================
+//  تفضيلات العرض المحلية (ui-prefs.json) — لغة وسمة هذا الجهاز فقط.
+//  محلية مثل lan-config تماماً ولا تدخل البيانات المزامَنة: لولا ذلك لقلب تغييرُ
+//  المحاسب للغة واجهاتِ كل الأجهزة. القيمة الفارغة = استعمل الإعداد المشترك (توافق رجعي).
+// ==========================================================================
+const UI_PREFS_FILE = () => path.join(app.getPath('userData'), 'ui-prefs.json');
+function readUiPrefs() {
+  try {
+    if (fs.existsSync(UI_PREFS_FILE())) {
+      const c = JSON.parse(fs.readFileSync(UI_PREFS_FILE(), 'utf8')) || {};
+      return {
+        lang: ['ar', 'fr', 'en'].includes(c.lang) ? c.lang : '',
+        theme: ['dark', 'light'].includes(c.theme) ? c.theme : ''
+      };
+    }
+  } catch (e) { console.error('ui prefs read error', e.message); }
+  return { lang: '', theme: '' };
+}
+function writeUiPrefs(patch) {
+  // نتجاهل المفاتيح غير المرسَلة (undefined) كي لا تمسح قيمة محفوظة
+  const clean = {};
+  ['lang', 'theme'].forEach(k => { if (patch && patch[k] !== undefined) clean[k] = patch[k]; });
+  const next = { ...readUiPrefs(), ...clean };
+  fs.writeFileSync(UI_PREFS_FILE(), JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
 let hostServer = null;        // خادم HTTP في وضع المضيف
 let sseClients = new Set();   // اتصالات SSE المفتوحة من الأجهزة العميلة
 let clientStream = null;      // اتصال SSE الصادر في وضع العميل
@@ -162,9 +189,21 @@ function broadcastToClients(payloadStr) {
 }
 
 // إرسال تعديل من العميل إلى المضيف (المضيف يخزّن ويبثّ للجميع)
+// عند الفشل لا نكتفي بالسجل: نبلّغ الواجهة (sync:postFailed) لعرض تنبيه واضح للمستخدم،
+// وإلا ظنّ المحاسب أن قيده وصل للخادم بينما الاتصال منقطع.
+function notifySyncPostFailed() {
+  try { if (win && !win.isDestroyed()) win.webContents.send('sync:postFailed'); } catch (e) {}
+}
 function postToHost(data) {
   const cfg = readLanConfig();
   if (!cfg.hostIp) return;
+  let failNotified = false; // الفشل قد يصل من أكثر من حدث (timeout ثم error) — تنبيه واحد يكفي
+  const fail = (msg) => {
+    if (failNotified) return;
+    failNotified = true;
+    console.error('post to host error:', msg);
+    notifySyncPostFailed();
+  };
   try {
     const req = http.request({
       hostname: cfg.hostIp, port: cfg.port, path: '/sync', method: 'POST',
@@ -172,12 +211,16 @@ function postToHost(data) {
         'Content-Type': 'application/json', 'x-sened-token': cfg.token || '',
         'x-sened-device': encodeURIComponent(cfg.deviceName || '')
       }, timeout: 5000
+    }, (res) => {
+      // رفض المضيف (401 رمز خاطئ / خطأ خادم) فشلٌ أيضاً وإن نجح الاتصال شبكياً
+      if (res.statusCode !== 200) fail('http ' + res.statusCode);
+      res.resume();
     });
-    req.on('error', (e) => console.error('post to host error:', e.message));
-    req.on('timeout', () => req.destroy());
+    req.on('error', (e) => fail(e.message));
+    req.on('timeout', () => { req.destroy(); fail('timeout'); });
     req.write(JSON.stringify(data));
     req.end();
-  } catch (err) { console.error('post to host invalid:', err.message); }
+  } catch (err) { fail(err.message); }
 }
 
 function startHostServer() {
@@ -1090,6 +1133,12 @@ ipcMain.handle('app:setFlavor', (e, flavor) => {
 ipcMain.handle('deviceRole:get', () => readDeviceRole());
 ipcMain.handle('deviceRole:set', (e, role) => writeDeviceRole(role));
 ipcMain.handle('deviceRole:clear', () => writeDeviceRole(null));
+// تفضيلات العرض المحلية (لغة/سمة هذا الجهاز) — خارج البيانات المزامَنة
+ipcMain.handle('uiPrefs:get', () => readUiPrefs());
+ipcMain.handle('uiPrefs:set', (e, prefs) => writeUiPrefs({
+  lang: ['ar', 'fr', 'en', ''].includes(prefs && prefs.lang) ? prefs.lang : undefined,
+  theme: ['dark', 'light', ''].includes(prefs && prefs.theme) ? prefs.theme : undefined
+}));
 ipcMain.handle('lan:getConfig', () => readLanConfig());
 ipcMain.handle('lan:setConfig', (e, cfg) => {
   let token = (cfg.token || '').trim();
