@@ -34,11 +34,11 @@ function readLanConfig() {
       const c = JSON.parse(fs.readFileSync(LAN_FILE(), 'utf8')) || {};
       return {
         role: c.role || 'off', hostIp: c.hostIp || '', port: Number(c.port) || SYNC_PORT_DEFAULT,
-        token: c.token || '', deviceName: c.deviceName || ''
+        token: c.token || '', deviceName: c.deviceName || '', lastHostIp: c.lastHostIp || ''
       };
     }
   } catch (e) { console.error('lan config read error', e.message); }
-  return { role: 'off', hostIp: '', port: SYNC_PORT_DEFAULT, token: '', deviceName: '' };
+  return { role: 'off', hostIp: '', port: SYNC_PORT_DEFAULT, token: '', deviceName: '', lastHostIp: '' };
 }
 function writeLanConfig(patch) {
   const next = { ...readLanConfig(), ...patch };
@@ -168,6 +168,20 @@ let sseClients = new Set();   // اتصالات SSE المفتوحة من الأ
 let clientStream = null;      // اتصال SSE الصادر في وضع العميل
 let clientConnected = false;
 let clientReconnectTimer = null;
+let hostServerError = '';     // سبب فشل تشغيل خادم المضيف ('' = يعمل أو متوقف عمداً) — يُعرض في لوحة الشبكة
+let hostIpChangedFrom = '';   // عنوان المضيف في آخر تشغيل إن اختلف عن الحالي (تنبيه «حدّث الأجهزة»)
+let clientSeq = 0;            // معرّف تسلسلي لاتصالات SSE (لفصل جهاز بعينه)
+
+// سجل الأجهزة التي اتصلت بهذا المضيف خلال الجلسة: name|ip ← { id, name, ip, connected, lastSeen }
+// في الذاكرة فقط (يبدأ فارغاً مع كل تشغيل) — ليس بيانات مزامَنة ولا يُخزَّن في lan-config.json.
+let clientRegistry = new Map();
+function touchClientRegistry(name, ip) {
+  if (!name && !ip) return;
+  const key = (name || '') + '|' + (ip || '');
+  const cur = clientRegistry.get(key);
+  if (cur) { cur.lastSeen = Date.now(); }
+  else clientRegistry.set(key, { id: 0, name: name || ip, ip: ip || '', connected: false, lastSeen: Date.now() });
+}
 
 // رقم مراجعة الحالة الحالية (يقرأ من الملف المخزَّن)
 function currentRev() {
@@ -262,6 +276,8 @@ function startHostServer() {
         const str = JSON.stringify(incoming, null, 2);
         fs.writeFileSync(DATA_FILE(), str, 'utf8');
         res.json({ ok: true, rev: incoming._rev });
+        // تحديث «آخر ظهور» للجهاز المرسِل في جدول الأجهزة المتصلة
+        touchClientRegistry(decodeURIComponent(req.get('x-sened-device') || ''), (req.socket.remoteAddress || '').replace('::ffff:', ''));
         broadcastToClients(JSON.stringify(incoming));
         if (win) win.webContents.send('sync:updated');
       } catch (e) { res.status(500).json({ error: e.message }); }
@@ -278,21 +294,49 @@ function startHostServer() {
       if (res.flushHeaders) res.flushHeaders();
       res.write(`event: hello\ndata: ${JSON.stringify({ rev: currentRev() })}\n\n`);
       // اسم الجهاز العميل (من ترويسة x-sened-device) ليعرف المدير مَن المتصل
-      res._deviceName = decodeURIComponent(req.get('x-sened-device') || '') || (req.socket.remoteAddress || '').replace('::ffff:', '');
+      const clientIp = (req.socket.remoteAddress || '').replace('::ffff:', '');
+      res._deviceName = decodeURIComponent(req.get('x-sened-device') || '') || clientIp;
+      res._clientId = ++clientSeq;
+      // تسجيل الجهاز في جدول «الأجهزة المتصلة» (اسم — حالة — آخر ظهور)
+      const regKey = res._deviceName + '|' + clientIp;
+      res._regKey = regKey;
+      clientRegistry.set(regKey, { id: res._clientId, name: res._deviceName, ip: clientIp, connected: true, lastSeen: Date.now() });
       sseClients.add(res);
       if (win) win.webContents.send('sync:updated'); // تحديث عدّاد الأجهزة المتصلة في الواجهة
       const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) {} }, 25000);
-      req.on('close', () => { clearInterval(hb); sseClients.delete(res); if (win) win.webContents.send('sync:updated'); });
+      req.on('close', () => {
+        clearInterval(hb); sseClients.delete(res);
+        const entry = clientRegistry.get(regKey);
+        if (entry && entry.id === res._clientId) { entry.connected = false; entry.lastSeen = Date.now(); }
+        if (win) win.webContents.send('sync:updated');
+      });
     });
 
     hostServer = http.createServer(srvApp);
-    hostServer.on('error', (e) => console.error('Host server error:', e.message));
+    hostServerError = '';
+    // فشل التشغيل (أشهره: المنفذ محجوز EADDRINUSE) يجب أن يظهر للمدير في لوحة الشبكة، لا في console فقط
+    hostServer.on('error', (e) => {
+      console.error('Host server error:', e.message);
+      hostServerError = (e && e.code === 'EADDRINUSE') ? 'EADDRINUSE' : (e.message || 'error');
+      try { hostServer.close(); } catch (e2) {}
+      hostServer = null;
+      if (win) win.webContents.send('sync:updated');
+    });
     hostServer.listen(cfg.port, '0.0.0.0', () => {
       console.log(`Sened host server listening on ${getLocalIp()}:${cfg.port}`);
+      hostServerError = '';
+      // تنبيه تغيّر العنوان: قارن IP الحالي بآخر تشغيل (محفوظ محلياً في lan-config.json)
+      const ip = getLocalIp();
+      if (ip && ip !== '127.0.0.1') {
+        if (cfg.lastHostIp && cfg.lastHostIp !== ip) hostIpChangedFrom = cfg.lastHostIp;
+        if (cfg.lastHostIp !== ip) writeLanConfig({ lastHostIp: ip });
+      }
+      if (win) win.webContents.send('sync:updated');
     });
     startDiscoveryBeacon(); // يبثّ وجود الخادم على الشبكة ليكتشفه بقية الأجهزة تلقائياً
   } catch (err) {
     console.error('Failed to start host server:', err.message);
+    hostServerError = err.message || 'error';
   }
 }
 
@@ -1144,8 +1188,9 @@ ipcMain.handle('lan:setConfig', (e, cfg) => {
   let token = (cfg.token || '').trim();
   // كود الاقتران: يتولّد تلقائياً على المضيف إن تُرك فارغاً (6 أرقام يعرضها للأجهزة الأخرى)
   if ((cfg.role || 'off') === 'host' && !token) token = String(crypto.randomInt(100000, 999999));
+  const port = Math.min(65535, Math.max(1024, Number(cfg.port) || SYNC_PORT_DEFAULT));
   const next = writeLanConfig({
-    role: cfg.role || 'off', hostIp: (cfg.hostIp || '').trim(), port: cfg.port || SYNC_PORT_DEFAULT,
+    role: cfg.role || 'off', hostIp: (cfg.hostIp || '').trim(), port,
     token, deviceName: (cfg.deviceName || '').trim().slice(0, 40)
   });
   applyLanMode();
@@ -1158,8 +1203,33 @@ ipcMain.handle('lan:status', () => {
     deviceName: cfg.deviceName || '', token: cfg.token || '',
     serverRunning: !!hostServer, connectedClients: sseClients.size,
     clientNames: [...sseClients].map(r => r._deviceName || '').filter(Boolean),
+    // جدول إدارة الأجهزة: كل جهاز عرف نفسه لهذا المضيف خلال الجلسة (متصل أو انقطع)
+    clients: [...clientRegistry.values()].sort((a, b) => b.lastSeen - a.lastSeen),
+    serverError: hostServerError,          // '' أو 'EADDRINUSE' أو رسالة الخطأ
+    ipChangedFrom: hostIpChangedFrom,      // IP آخر تشغيل إن اختلف عن الحالي
     clientConnected, rev: currentRev()
   };
+});
+// توليد كود اقتران جديد (للمضيف): الكود القديم يبطل فوراً وتُفصل الأجهزة المتصلة
+// (إعادة اتصالها التلقائي سترفض بـ 401 حتى يُدخَل الكود الجديد فيها)
+ipcMain.handle('lan:regenToken', () => {
+  const cfg = readLanConfig();
+  if (cfg.role !== 'host') return { ok: false, error: 'not host' };
+  const token = String(crypto.randomInt(100000, 999999));
+  writeLanConfig({ token });
+  for (const res of sseClients) { try { res.socket.destroy(); } catch (e2) {} }
+  return { ok: true, token };
+});
+// فصل جهاز متصل بعينه (يغلق اتصال SSE الخاص به). ملاحظة: إن بقي كود الاقتران صالحاً
+// سيعيد الجهاز الاتصال تلقائياً خلال ثوانٍ — للفصل النهائي ولّد كوداً جديداً.
+ipcMain.handle('lan:kickClient', (e, id) => {
+  for (const res of sseClients) {
+    if (res._clientId === Number(id)) {
+      try { res.socket.destroy(); } catch (e2) { try { res.end(); } catch (e3) {} }
+      return { ok: true };
+    }
+  }
+  return { ok: false, error: 'not found' };
 });
 // البحث عن خوادم سند على الشبكة المحلية (اكتشاف تلقائي عبر UDP)
 ipcMain.handle('lan:discover', () => discoverHosts(3000));

@@ -60,11 +60,13 @@ const bridge = window.sened || {
   deviceRoleGet: async () => JSON.parse(localStorage.getItem('sened-devrole') || 'null') || { role: null, boundAt: '' },
   deviceRoleSet: async (role) => { const v = { role, boundAt: new Date().toISOString() }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
   deviceRoleClear: async () => { const v = { role: null, boundAt: '' }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
-  lanGetConfig: async () => ({ role: 'off', hostIp: '', port: 3050, token: '', deviceName: '' }),
+  lanGetConfig: async () => ({ role: 'off', hostIp: '', port: 3050, token: '', deviceName: '', lastHostIp: '' }),
   lanSetConfig: async () => ({ ok: true }),
-  lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', deviceName: '', token: '', serverRunning: false, connectedClients: 0, clientNames: [], clientConnected: false, rev: 0 }),
+  lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', deviceName: '', token: '', serverRunning: false, connectedClients: 0, clientNames: [], clients: [], serverError: '', ipChangedFrom: '', clientConnected: false, rev: 0 }),
   lanTest: async () => ({ ok: false, error: 'BROWSER' }),
   lanDiscover: async () => [],
+  lanRegenToken: async () => ({ ok: false, error: 'BROWSER' }),
+  lanKickClient: async () => ({ ok: false, error: 'BROWSER' }),
   onSyncPostFailed: () => {},
   uiPrefsGet: async () => JSON.parse(localStorage.getItem('sened-uiprefs') || 'null') || { lang: '', theme: '' },
   uiPrefsSet: async (p) => {
@@ -1958,9 +1960,19 @@ async function refreshLanUI() {
       const ip = st.myIp && st.myIp !== '127.0.0.1' ? st.myIp : null;
       $('lanMyAddress').textContent = ip ? `${ip}:${st.port}` : (T.lanNoNetwork || '—');
     }
+    if ($('lanPort')) $('lanPort').value = cfg.port || 3050;
+    // فشل تشغيل الخادم (المنفذ محجوز غالباً) — رسالة واضحة بدل الفشل الصامت
+    if ($('lanHostError')) {
+      const err = cfg.role === 'host' ? (st.serverError || '') : '';
+      $('lanHostError').style.display = err ? '' : 'none';
+      $('lanHostError').textContent = err === 'EADDRINUSE'
+        ? `⚠ ${T.lanPortBusy || ''} (${st.port})`
+        : (err ? `⚠ ${T.lanServerError || ''}: ${err}` : '');
+    }
+    // شريط تحذير تغيّر عنوان الخادم منذ آخر تشغيل
+    if ($('lanIpChangedBar')) $('lanIpChangedBar').style.display = (cfg.role === 'host' && st.ipChangedFrom) ? '' : 'none';
     if ($('lanClientCount')) $('lanClientCount').textContent = st.connectedClients || 0;
-    // أسماء الأجهزة المتصلة بالمضيف — ليعرف المدير مَن معه على الشبكة
-    if ($('lanClientNames')) $('lanClientNames').textContent = (st.clientNames && st.clientNames.length) ? '— ' + st.clientNames.map(esc).join('، ') : '';
+    renderLanClients(cfg, st);
     if ($('lanClientStatus') && cfg.role === 'client') {
       $('lanClientStatus').textContent = st.clientConnected ? ('✓ ' + (T.lanConnected || '')) : ('… ' + (T.lanConnecting || ''));
       $('lanClientStatus').style.color = st.clientConnected ? 'var(--gold)' : 'var(--muted)';
@@ -1993,16 +2005,86 @@ function onLanRoleChange() {
   if ($('lanNameBox')) $('lanNameBox').style.display = role === 'off' ? 'none' : 'block';
 }
 
+// جدول إدارة الأجهزة المتصلة بالمضيف: اسم الجهاز — الحالة — آخر ظهور — زر فصل
+function renderLanClients(cfg, st) {
+  const box = $('lanClientsTable'); if (!box) return;
+  if (cfg.role !== 'host' || !st.clients || !st.clients.length) {
+    box.innerHTML = cfg.role === 'host' ? `<p class="muted">${T.lanNoClients || ''}</p>` : '';
+    return;
+  }
+  const rows = st.clients.map(c => `
+    <tr>
+      <td>${esc(c.name)}</td>
+      <td style="color:${c.connected ? 'var(--gold)' : 'var(--muted)'}">${c.connected ? '● ' + (T.lanClientOnline || '') : '○ ' + (T.lanClientOffline || '')}</td>
+      <td dir="ltr">${fmtLastSeen(c.lastSeen)}</td>
+      <td>${c.connected ? `<button class="btn btn-ghost" onclick="kickLanClient(${Number(c.id)})">${T.lanKick || ''}</button>` : ''}</td>
+    </tr>`).join('');
+  box.innerHTML = `<div class="tbl-wrap"><table>
+    <thead><tr><th>${T.lanClientsDevice || ''}</th><th>${T.lanClientsStatus || ''}</th><th>${T.lanClientsLastSeen || ''}</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+// «آخر ظهور» بأرقام غربية: وقت اليوم إن كان اليوم نفسه، وإلا التاريخ والوقت
+function fmtLastSeen(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts), now = new Date();
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === now.toDateString() ? time : `${d.toLocaleDateString('en-GB')} ${time}`;
+}
+
+// فصل جهاز متصل (يغلق اتصاله الحالي؛ للفصل النهائي ولّد كود اقتران جديداً)
+async function kickLanClient(id) {
+  try {
+    const r = await bridge.lanKickClient(id);
+    if (r.ok) toast(T.lanKicked || '');
+  } catch (e) {}
+  setTimeout(refreshLanUI, 500);
+}
+
+// نسخ عنوان الخادم (IP:منفذ) للحافظة ليرسله المدير للأجهزة الأخرى
+async function copyLanAddress() {
+  const addr = $('lanMyAddress') ? $('lanMyAddress').textContent.trim() : '';
+  if (!addr || !addr.includes(':')) return;
+  try { await navigator.clipboard.writeText(addr); }
+  catch (e) {
+    // بديل للبيئات التي تمنع Clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = addr; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+    ta.remove();
+  }
+  toast(T.lanAddressCopied || '');
+}
+
+// توليد كود اقتران جديد: يبطل القديم فوراً ويفصل الأجهزة المتصلة حتى تُدخل الكود الجديد
+async function regenLanToken() {
+  if (currentRole !== 'manager') { toast(T.accessDenied); return; }
+  if (!confirm(T.lanRegenConfirm || '')) return;
+  try {
+    const r = await bridge.lanRegenToken();
+    if (r.ok) toast(T.lanRegenDone || '');
+  } catch (e) {}
+  setTimeout(refreshLanUI, 500);
+}
+
 async function saveLanConfig() {
   const role = $('lanRoleSelect').value;
   // فرض الصلاحية عند نقطة الحفظ (لا إخفاء CSS فقط): وضع المضيف حكر على المدير
   if (role === 'host' && currentRole !== 'manager') { toast(T.accessDenied); return; }
-  const hostIp = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
+  let hostIp = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
   const deviceName = $('lanDeviceName') ? $('lanDeviceName').value.trim() : '';
   // المضيف يحتفظ بكوده الحالي (يتولّد في العملية الرئيسية إن كان فارغاً)؛ العميل يرسل ما كتبه
   const cur = await bridge.lanGetConfig();
   const token = role === 'host' ? (cur.token || '') : ($('lanToken') ? $('lanToken').value.trim() : '');
-  await bridge.lanSetConfig({ role, hostIp, token, deviceName });
+  // المنفذ: المضيف يضبطه من خانته؛ العميل يقبله ضمن العنوان بصيغة ip:منفذ (وإلا بقي المحفوظ)
+  let port = cur.port || 3050;
+  if (role === 'host' && $('lanPort')) port = parseInt($('lanPort').value, 10) || 3050;
+  if (role === 'client' && hostIp.includes(':')) {
+    const parts = hostIp.split(':');
+    hostIp = parts[0].trim();
+    port = parseInt(parts[1], 10) || port;
+  }
+  await bridge.lanSetConfig({ role, hostIp, token, deviceName, port });
   toast(T.saved);
   if (role === 'client' && hostIp) { DB = await bridge.loadData(); renderAll(); }
   setTimeout(refreshLanUI, 500);
@@ -2021,7 +2103,7 @@ async function discoverLanHosts() {
     } else {
       list.innerHTML = hosts.map(h =>
         `<button class="btn btn-ghost" style="width:100%;margin-top:6px;justify-content:space-between;display:flex"
-           onclick="pickDiscoveredHost('${esc(h.ip)}')">
+           onclick="pickDiscoveredHost('${esc(h.ip)}', ${Number(h.port) || 3050})">
            <span>◈ ${esc(h.name) || (T.lanRoleHost || '')}</span><span dir="ltr" class="muted">${esc(h.ip)}</span>
          </button>`).join('');
     }
@@ -2029,8 +2111,9 @@ async function discoverLanHosts() {
   if (btn) btn.disabled = false;
 }
 
-function pickDiscoveredHost(ip) {
-  if ($('lanHostIp')) $('lanHostIp').value = ip;
+function pickDiscoveredHost(ip, port) {
+  // منفذ غير افتراضي يُكتب ضمن العنوان بصيغة ip:منفذ ليُحفظ مع الإعداد
+  if ($('lanHostIp')) $('lanHostIp').value = (port && port !== 3050) ? `${ip}:${port}` : ip;
   testLanHost(); // اختبار فوري بعد الاختيار
 }
 
@@ -2064,11 +2147,14 @@ async function clearDeviceRole() {
 }
 
 async function testLanHost() {
-  const ip = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
+  let ip = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
   if (!ip) return;
+  // العنوان قد يتضمن المنفذ بصيغة ip:منفذ (خادم على منفذ غير الافتراضي)
+  let port;
+  if (ip.includes(':')) { const parts = ip.split(':'); ip = parts[0].trim(); port = parseInt(parts[1], 10) || undefined; }
   const token = $('lanToken') ? $('lanToken').value.trim() : '';
   if ($('lanClientStatus')) { $('lanClientStatus').textContent = '… ' + (T.lanTesting || ''); $('lanClientStatus').style.color = 'var(--muted)'; }
-  const r = await bridge.lanTest(ip, undefined, token);
+  const r = await bridge.lanTest(ip, port, token);
   if ($('lanClientStatus')) {
     const msg = r.ok ? ('✓ ' + (T.lanReachable || ''))
       : (r.error === 'unauthorized'
