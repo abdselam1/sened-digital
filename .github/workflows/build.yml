@@ -32,3 +32,15 @@ jobs:
         with:
           name: sened-windows
           path: dist/*.exe
+      # نشر النسخ في فرع dist داخل المستودع (لتحميلها عبر git أيضاً)
+      - name: Publish builds to dist branch
+        shell: bash
+        run: |
+          mkdir -p /tmp/distpub && cp dist/*.exe /tmp/distpub/
+          cd /tmp/distpub
+          git init -b dist
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "Windows builds ${GITHUB_REF_NAME:-manual}"
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" dist
