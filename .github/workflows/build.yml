@@ -1,0 +1,34 @@
+# يبني مثبّت ويندوز (نسخة تثبيت + نسخة محمولة للفلاشة) وينشرهما في صفحة Releases
+name: Build Windows Installer
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - run: npx electron-builder --win nsis portable --publish never
+      - name: List artifacts
+        run: dir dist
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*.exe
+          fail_on_unmatched_files: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sened-windows
+          path: dist/*.exe

@@ -2033,7 +2033,9 @@ async function testLanHost() {
   const r = await bridge.lanTest(ip, undefined, token);
   if ($('lanClientStatus')) {
     const msg = r.ok ? ('✓ ' + (T.lanReachable || ''))
-      : (r.error === 'unauthorized' ? ('✗ ' + (T.lanTokenWrong || '')) : ('✗ ' + (T.lanUnreachable || '')));
+      : (r.error === 'unauthorized'
+        ? (token ? ('✗ ' + (T.lanTokenWrong || '')) : ('🔑 ' + (T.lanNeedCode || '')))
+        : ('✗ ' + (T.lanUnreachable || '')));
     $('lanClientStatus').textContent = msg;
     $('lanClientStatus').style.color = r.ok ? 'var(--gold)' : '#e0607a';
   }
