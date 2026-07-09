@@ -60,10 +60,11 @@ const bridge = window.sened || {
   deviceRoleGet: async () => JSON.parse(localStorage.getItem('sened-devrole') || 'null') || { role: null, boundAt: '' },
   deviceRoleSet: async (role) => { const v = { role, boundAt: new Date().toISOString() }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
   deviceRoleClear: async () => { const v = { role: null, boundAt: '' }; localStorage.setItem('sened-devrole', JSON.stringify(v)); return v; },
-  lanGetConfig: async () => ({ role: 'off', hostIp: '', port: 3050 }),
+  lanGetConfig: async () => ({ role: 'off', hostIp: '', port: 3050, token: '', deviceName: '' }),
   lanSetConfig: async () => ({ ok: true }),
-  lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', serverRunning: false, connectedClients: 0, clientConnected: false, rev: 0 }),
-  lanTest: async () => ({ ok: false, error: 'BROWSER' })
+  lanStatus: async () => ({ role: 'off', hostIp: '', port: 3050, myIp: '127.0.0.1', deviceName: '', token: '', serverRunning: false, connectedClients: 0, clientNames: [], clientConnected: false, rev: 0 }),
+  lanTest: async () => ({ ok: false, error: 'BROWSER' }),
+  lanDiscover: async () => []
 };
 
 // ---------- الترجمة ----------
@@ -299,7 +300,7 @@ function cmdkRender(query) {
     const canSee = page => !allowed || allowed.includes(page);
     const dataResults = [];
     if (canSee('products')) DB.products.forEach(p => { if (p.name.toLowerCase().includes(q)) dataResults.push({ icon: '▣', label: p.name, sub: `${T.products} · ${fmt(p.price)} ${cur()}`, action: () => { closeCmdk(); goPage('products'); $('prodSearch').value = p.name; renderProducts(); } }); });
-    if (canSee('customers')) DB.customers.forEach(c => { if (c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) dataResults.push({ icon: '◉', label: c.name, sub: T.customers, action: () => { closeCmdk(); goPage('customers'); $('custSearch').value = c.name; renderCustomers(); } }); });
+    if (canSee('customers')) DB.customers.forEach(c => { if (c.name.toLowerCase().includes(q) || (c.phone || '').includes(q) || (c.accountNo || '').toLowerCase().includes(q)) dataResults.push({ icon: '◉', label: c.accountNo ? `${c.name} (${c.accountNo})` : c.name, sub: T.customers, action: () => { closeCmdk(); goPage('customers'); $('custSearch').value = c.name; renderCustomers(); } }); });
     if (canSee('suppliers')) DB.suppliers.forEach(s => { if (s.name.toLowerCase().includes(q)) dataResults.push({ icon: '◎', label: s.name, sub: T.suppliers, action: () => { closeCmdk(); goPage('suppliers'); } }); });
     if (canSee('invoices')) DB.invoices.forEach(i => { if (String(i.number).includes(q) || (i.customerName || '').toLowerCase().includes(q)) dataResults.push({ icon: '▤', label: `#${i.number} — ${i.customerName || T.walkIn}`, sub: `${fmt(i.total)} ${cur()}`, action: () => { closeCmdk(); goPage('invoices'); } }); });
     if (canSee('employees')) DB.employees.forEach(e => { if (e.name.toLowerCase().includes(q)) dataResults.push({ icon: '◈', label: e.name, sub: T.employees, action: () => { closeCmdk(); goPage('employees'); } }); });
@@ -464,7 +465,9 @@ function printBarcode(id) {
 // ---------- سجل التدقيق وسلة المحذوفات ----------
 function logAudit(action, entityType, label) {
   DB.auditLog = DB.auditLog || [];
-  DB.auditLog.unshift({ id: uid('al'), action, entityType, label: label || '', user: currentUserName, date: new Date().toISOString() });
+  // اسم الجهاز (إن ضُبط في إعدادات الشبكة) يُلحق بالمستخدم ليعرف المدير من أي جهاز تمّت العملية
+  const who = lanDeviceName ? `${currentUserName} @ ${lanDeviceName}` : currentUserName;
+  DB.auditLog.unshift({ id: uid('al'), action, entityType, label: label || '', user: who, device: lanDeviceName || '', date: new Date().toISOString() });
   if (DB.auditLog.length > 500) DB.auditLog.length = 500;
 }
 
@@ -659,23 +662,35 @@ async function saveProduct(id) {
 async function delProduct(id) { await softDelete('products', id, T.products); }
 
 // ---------- العملاء ----------
+// رقم حساب الزبون (Numéro de compte): متسلسل بصيغة C-0001، يتولّد تلقائياً ولا يتكرر
+function nextCustomerAccountNo() {
+  const max = DB.customers.reduce((m, c) => {
+    const n = parseInt(String(c.accountNo || '').replace(/^C-/, ''), 10);
+    return Number.isFinite(n) && n > m ? n : m;
+  }, 0);
+  return 'C-' + String(max + 1).padStart(4, '0');
+}
+
 function renderCustomers() {
   const q = ($('custSearch').value || '').toLowerCase();
-  const list = DB.customers.filter(c => !q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q));
-  $('custTable').innerHTML = `<thead><tr><th>${T.name}</th><th>${T.phone}</th><th>${T.address}</th><th>${T.debt}</th><th>${T.actions}</th></tr></thead><tbody>` +
+  const list = DB.customers.filter(c => !q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q) || (c.accountNo || '').toLowerCase().includes(q));
+  $('custTable').innerHTML = `<thead><tr><th>${T.accountNo}</th><th>${T.name}</th><th>${T.phone}</th><th>${T.address}</th><th>${T.debt}</th><th>${T.actions}</th></tr></thead><tbody>` +
     (list.length ? list.map(c => {
       const debt = DB.invoices.filter(i => i.customerId === c.id).reduce((s, i) => s + Math.max(0, i.total - (i.paidAmount || 0)), 0);
       return `<tr>
+      <td dir="ltr"><span class="badge">${esc(c.accountNo) || '—'}</span></td>
       <td><b>${esc(c.name)}</b></td><td dir="ltr">${esc(c.phone) || '—'}</td><td>${esc(c.address) || '—'}</td>
       <td>${debt > 0 ? `<span class="badge low">${fmt(debt)} ${cur()}</span>` : '—'}</td>
       <td><button class="btn btn-ghost btn-sm" onclick="openCustomerModal('${c.id}')">${T.edit}</button>
           <button class="btn btn-danger btn-sm" onclick="delCustomer('${c.id}')">${T.delete}</button></td>
-    </tr>`; }).join('') : `<tr><td colspan="5" class="empty">${T.noData}</td></tr>`) + '</tbody>';
+    </tr>`; }).join('') : `<tr><td colspan="6" class="empty">${T.noData}</td></tr>`) + '</tbody>';
 }
 
 function openCustomerModal(id) {
-  const c = DB.customers.find(x => x.id === id) || { name: '', phone: '', address: '' };
+  const c = DB.customers.find(x => x.id === id) || { name: '', phone: '', address: '', accountNo: '' };
+  const accNo = id ? (c.accountNo || '—') : nextCustomerAccountNo();
   openModal(`<h3>${id ? T.editCustomer : T.addCustomer}</h3>
+    <p class="muted" style="margin:0 0 10px">${T.accountNo}: <b dir="ltr" style="color:var(--gold)">${esc(accNo)}</b></p>
     <div class="field"><label>${T.name}</label><input id="mName" value="${esc(c.name)}"></div>
     <div class="grid2">
       <div class="field"><label>${T.phone}</label><input id="mPhone" value="${esc(c.phone)}"></div>
@@ -690,8 +705,11 @@ function openCustomerModal(id) {
 async function saveCustomer(id) {
   const obj = { name: $('mName').value.trim(), phone: $('mPhone').value.trim(), address: $('mAddr').value.trim() };
   if (!obj.name) return;
-  if (id) Object.assign(DB.customers.find(x => x.id === id), obj);
-  else DB.customers.push({ id: uid('c'), ...obj });
+  if (id) {
+    const c = DB.customers.find(x => x.id === id);
+    Object.assign(c, obj);
+    if (!c.accountNo) c.accountNo = nextCustomerAccountNo(); // ترقيم الزبائن القدامى عند أول تعديل
+  } else DB.customers.push({ id: uid('c'), accountNo: nextCustomerAccountNo(), ...obj });
   logAudit(id ? 'update' : 'create', T.customers, obj.name);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
@@ -764,7 +782,7 @@ function openInvoiceModal() {
   invLines = [{ productId: DB.products[0].id, qty: 1, price: DB.products[0].price }];
   openModal(`<h3>${T.newInvoice} #${DB.counters.invoice}</h3>
     <div class="field"><label>${T.customer}</label>
-      <select id="mCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="mCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}${c.accountNo ? ' — ' + esc(c.accountNo) : ''}</option>`).join('')}</select>
     </div>
     <div class="field"><input id="mBarcodeScan" placeholder="${T.scanBarcode}" onkeydown="if(event.key==='Enter'){event.preventDefault();scanBarcodeAdd(this.value);this.value='';}"></div>
     <div id="invLines"></div>
@@ -1022,7 +1040,7 @@ function openQuoteModal() {
   quoteLines = [{ productId: DB.products[0].id, qty: 1, price: DB.products[0].price }];
   openModal(`<h3>${T.newQuotation} #${DB.counters.quote}</h3>
     <div class="field"><label>${T.customer}</label>
-      <select id="mQCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="mQCust"><option value="">${T.walkIn}</option>${DB.customers.map(c => `<option value="${c.id}">${esc(c.name)}${c.accountNo ? ' — ' + esc(c.accountNo) : ''}</option>`).join('')}</select>
     </div>
     <div id="quoteLinesBox"></div>
     <button class="btn btn-ghost btn-sm" onclick="addQuoteLine()">+ ${T.addLine}</button>
@@ -1885,20 +1903,28 @@ function fillSettings() {
 
 // ---------- التزامن عبر الشبكة المحلية (LAN) ----------
 // إعداد الشبكة محلي لكل جهاز (يُقرأ عبر IPC) ولا يُخزَّن ضمن بيانات التطبيق المزامَنة.
+let lanDeviceName = ''; // اسم هذا الجهاز على الشبكة — يُستخدم أيضاً في سجل النشاط
 async function refreshLanUI() {
-  if (!$('lanRoleSelect')) return;
   try {
     const cfg = await bridge.lanGetConfig();
+    lanDeviceName = cfg.deviceName || '';
+    const st = await bridge.lanStatus();
+    updateSyncBadge(cfg, st);
+    if (!$('lanRoleSelect')) return;
     $('lanRoleSelect').value = cfg.role || 'off';
     if ($('lanHostIp')) $('lanHostIp').value = cfg.hostIp || '';
-    if ($('lanToken')) $('lanToken').value = cfg.token || '';
+    if ($('lanDeviceName')) $('lanDeviceName').value = cfg.deviceName || '';
+    // كود الاقتران: العميل يكتبه؛ المضيف يراه معروضاً (يتولّد تلقائياً عند الحفظ)
+    if ($('lanToken') && cfg.role === 'client') $('lanToken').value = cfg.token || '';
+    if ($('lanPairCodeShow')) $('lanPairCodeShow').textContent = (cfg.role === 'host' && cfg.token) ? cfg.token : '—';
     onLanRoleChange();
-    const st = await bridge.lanStatus();
     if ($('lanMyAddress')) {
       const ip = st.myIp && st.myIp !== '127.0.0.1' ? st.myIp : null;
       $('lanMyAddress').textContent = ip ? `${ip}:${st.port}` : (T.lanNoNetwork || '—');
     }
     if ($('lanClientCount')) $('lanClientCount').textContent = st.connectedClients || 0;
+    // أسماء الأجهزة المتصلة بالمضيف — ليعرف المدير مَن معه على الشبكة
+    if ($('lanClientNames')) $('lanClientNames').textContent = (st.clientNames && st.clientNames.length) ? '— ' + st.clientNames.map(esc).join('، ') : '';
     if ($('lanClientStatus') && cfg.role === 'client') {
       $('lanClientStatus').textContent = st.clientConnected ? ('✓ ' + (T.lanConnected || '')) : ('… ' + (T.lanConnecting || ''));
       $('lanClientStatus').style.color = st.clientConnected ? 'var(--gold)' : 'var(--muted)';
@@ -1906,22 +1932,68 @@ async function refreshLanUI() {
   } catch (e) { /* الواجهة قد تُفتح قبل جاهزية الجسر */ }
 }
 
+// مؤشر حالة التزامن الدائم في الشريط الجانبي (أخضر = متزامن، أحمر = انقطع)
+function updateSyncBadge(cfg, st) {
+  const badge = $('syncBadge'); if (!badge) return;
+  if (!cfg || cfg.role === 'off') { badge.style.display = 'none'; return; }
+  badge.style.display = '';
+  const dot = $('syncDot'), txt = $('syncStatusText');
+  if (cfg.role === 'host') {
+    const ok = !!st.serverRunning;
+    dot.style.background = ok ? '#3ecf6f' : '#e05555';
+    txt.textContent = ok ? `${T.syncHostOn || ''} (${st.connectedClients || 0})` : (T.syncHostOff || '');
+  } else {
+    const ok = !!st.clientConnected;
+    dot.style.background = ok ? '#3ecf6f' : '#e05555';
+    txt.textContent = ok ? (T.syncConnected || '') : (T.syncOffline || '');
+  }
+}
+
 function onLanRoleChange() {
   const role = $('lanRoleSelect') ? $('lanRoleSelect').value : 'off';
   if ($('lanHostBox')) $('lanHostBox').style.display = role === 'host' ? 'block' : 'none';
   if ($('lanClientBox')) $('lanClientBox').style.display = role === 'client' ? 'block' : 'none';
-  // رمز الحماية المشترك يظهر للمضيف والعميل معاً (يجب أن يتطابق على كل الأجهزة)
-  if ($('lanTokenBox')) $('lanTokenBox').style.display = role === 'off' ? 'none' : 'block';
+  // اسم الجهاز يظهر لأي دور شبكي (مضيف أو متصل) ليعرف الجميع بعضهم
+  if ($('lanNameBox')) $('lanNameBox').style.display = role === 'off' ? 'none' : 'block';
 }
 
 async function saveLanConfig() {
   const role = $('lanRoleSelect').value;
   const hostIp = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
-  const token = $('lanToken') ? $('lanToken').value.trim() : '';
-  await bridge.lanSetConfig({ role, hostIp, token });
+  const deviceName = $('lanDeviceName') ? $('lanDeviceName').value.trim() : '';
+  // المضيف يحتفظ بكوده الحالي (يتولّد في العملية الرئيسية إن كان فارغاً)؛ العميل يرسل ما كتبه
+  const cur = await bridge.lanGetConfig();
+  const token = role === 'host' ? (cur.token || '') : ($('lanToken') ? $('lanToken').value.trim() : '');
+  await bridge.lanSetConfig({ role, hostIp, token, deviceName });
   toast(T.saved);
   if (role === 'client' && hostIp) { DB = await bridge.loadData(); renderAll(); }
   setTimeout(refreshLanUI, 500);
+}
+
+// البحث التلقائي عن خادم سند على الشبكة (بلا إدخال IP): يعرض الخوادم الموجودة بأسمائها
+async function discoverLanHosts() {
+  const list = $('lanDiscoveryList'), btn = $('lanDiscoverBtn');
+  if (!list) return;
+  if (btn) btn.disabled = true;
+  list.innerHTML = `<p class="muted">… ${T.lanDiscovering || ''}</p>`;
+  try {
+    const hosts = await bridge.lanDiscover();
+    if (!hosts.length) {
+      list.innerHTML = `<p class="muted">${T.lanDiscoverNone || ''}</p>`;
+    } else {
+      list.innerHTML = hosts.map(h =>
+        `<button class="btn btn-ghost" style="width:100%;margin-top:6px;justify-content:space-between;display:flex"
+           onclick="pickDiscoveredHost('${esc(h.ip)}')">
+           <span>◈ ${esc(h.name) || (T.lanRoleHost || '')}</span><span dir="ltr" class="muted">${esc(h.ip)}</span>
+         </button>`).join('');
+    }
+  } catch (e) { list.innerHTML = `<p class="muted">${T.lanDiscoverNone || ''}</p>`; }
+  if (btn) btn.disabled = false;
+}
+
+function pickDiscoveredHost(ip) {
+  if ($('lanHostIp')) $('lanHostIp').value = ip;
+  testLanHost(); // اختبار فوري بعد الاختيار
 }
 
 // ---------- قفل دور الجهاز (إدارة المدير فقط) ----------
@@ -2357,6 +2429,10 @@ async function onRemoteSync() {
   APP_FLAVOR = await bridge.appFlavor();
   deviceBoundRole = (await bridge.deviceRoleGet()).role;
   bridge.onSyncUpdated(onRemoteSync);
+  // مؤشر التزامن في الشريط الجانبي: تحديث دوري خفيف حتى خارج صفحة الإعدادات
+  setInterval(async () => {
+    try { const cfg = await bridge.lanGetConfig(); lanDeviceName = cfg.deviceName || ''; updateSyncBadge(cfg, await bridge.lanStatus()); } catch (e) {}
+  }, 5000);
   applyLang();
   applyTheme();
   fillSettings();

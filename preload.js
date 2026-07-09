@@ -37,5 +37,6 @@ contextBridge.exposeInMainWorld('sened', {
   lanGetConfig: () => ipcRenderer.invoke('lan:getConfig'),
   lanSetConfig: (cfg) => ipcRenderer.invoke('lan:setConfig', cfg),
   lanStatus: () => ipcRenderer.invoke('lan:status'),
-  lanTest: (ip, port, token) => ipcRenderer.invoke('lan:test', { ip, port, token })
+  lanTest: (ip, port, token) => ipcRenderer.invoke('lan:test', { ip, port, token }),
+  lanDiscover: () => ipcRenderer.invoke('lan:discover')
 });

@@ -25,21 +25,90 @@ function getLocalIp() {
 //  المزامَنة، وإلا لانتشر عنوان/دور جهاز واحد إلى بقية الأجهزة.
 // ==========================================================================
 const SYNC_PORT_DEFAULT = 3050;
+const DISCOVERY_PORT = 3051; // منفذ UDP للاكتشاف التلقائي للخادم على الشبكة المحلية
 const LAN_FILE = () => path.join(app.getPath('userData'), 'lan-config.json');
 
 function readLanConfig() {
   try {
     if (fs.existsSync(LAN_FILE())) {
       const c = JSON.parse(fs.readFileSync(LAN_FILE(), 'utf8')) || {};
-      return { role: c.role || 'off', hostIp: c.hostIp || '', port: Number(c.port) || SYNC_PORT_DEFAULT, token: c.token || '' };
+      return {
+        role: c.role || 'off', hostIp: c.hostIp || '', port: Number(c.port) || SYNC_PORT_DEFAULT,
+        token: c.token || '', deviceName: c.deviceName || ''
+      };
     }
   } catch (e) { console.error('lan config read error', e.message); }
-  return { role: 'off', hostIp: '', port: SYNC_PORT_DEFAULT, token: '' };
+  return { role: 'off', hostIp: '', port: SYNC_PORT_DEFAULT, token: '', deviceName: '' };
 }
 function writeLanConfig(patch) {
   const next = { ...readLanConfig(), ...patch };
   fs.writeFileSync(LAN_FILE(), JSON.stringify(next, null, 2), 'utf8');
   return next;
+}
+
+// ==========================================================================
+//  الاكتشاف التلقائي (UDP Discovery) — بلا إدخال IP يدوياً
+//  المضيف يبثّ وجوده (اسمه وعنوانه) كل ثانيتين على منفذ UDP 3051 بثّاً عامّاً،
+//  والأجهزة الأخرى تستمع فتعرض «تم العثور على خادم سند» وتتصل بضغطة واحدة.
+//  لو تغيّر IP المضيف (إعادة تشغيل الراوتر) يكفي إعادة البحث — لا حفظ يدوي.
+// ==========================================================================
+const dgram = require('dgram');
+let discoveryTimer = null;   // مؤقّت البثّ في وضع المضيف
+let beaconSocket = null;     // مقبس UDP المرسِل
+
+function startDiscoveryBeacon() {
+  stopDiscoveryBeacon();
+  try {
+    beaconSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    beaconSocket.on('error', (e) => console.error('discovery beacon error:', e.message));
+    beaconSocket.bind(() => {
+      try { beaconSocket.setBroadcast(true); } catch (e) {}
+      const send = () => {
+        const cfg = readLanConfig();
+        if (cfg.role !== 'host' || !beaconSocket) return;
+        const msg = Buffer.from(JSON.stringify({
+          app: 'sened', name: cfg.deviceName || 'Sened', ip: getLocalIp(), port: cfg.port
+        }));
+        try { beaconSocket.send(msg, 0, msg.length, DISCOVERY_PORT, '255.255.255.255'); } catch (e) {}
+      };
+      send();
+      discoveryTimer = setInterval(send, 2000);
+    });
+  } catch (err) { console.error('discovery beacon failed:', err.message); }
+}
+
+function stopDiscoveryBeacon() {
+  if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
+  if (beaconSocket) { try { beaconSocket.close(); } catch (e) {} beaconSocket = null; }
+}
+
+// البحث عن مضيفين: يستمع على منفذ الاكتشاف لثوانٍ قليلة ويعيد قائمة فريدة {name, ip, port}
+function discoverHosts(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const found = new Map();
+    let sock;
+    try { sock = dgram.createSocket({ type: 'udp4', reuseAddr: true }); }
+    catch (e) { return resolve([]); }
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      try { sock.close(); } catch (e) {}
+      resolve([...found.values()]);
+    };
+    sock.on('error', finish);
+    sock.on('message', (buf, rinfo) => {
+      try {
+        const d = JSON.parse(buf.toString('utf8'));
+        if (d && d.app === 'sened') {
+          const ip = d.ip || rinfo.address;
+          const port = Number(d.port) || SYNC_PORT_DEFAULT;
+          found.set(ip + ':' + port, { name: String(d.name || ''), ip, port });
+        }
+      } catch (e) { /* رسالة غريبة على المنفذ — تُتجاهل */ }
+    });
+    try { sock.bind(DISCOVERY_PORT); } catch (e) { return finish(); }
+    setTimeout(finish, timeoutMs);
+  });
 }
 
 // ==========================================================================
@@ -99,7 +168,10 @@ function postToHost(data) {
   try {
     const req = http.request({
       hostname: cfg.hostIp, port: cfg.port, path: '/sync', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-sened-token': cfg.token || '' }, timeout: 5000
+      headers: {
+        'Content-Type': 'application/json', 'x-sened-token': cfg.token || '',
+        'x-sened-device': encodeURIComponent(cfg.deviceName || '')
+      }, timeout: 5000
     });
     req.on('error', (e) => console.error('post to host error:', e.message));
     req.on('timeout', () => req.destroy());
@@ -125,9 +197,9 @@ function startHostServer() {
       next();
     });
 
-    // فحص اتصال سريع للأجهزة العميلة
+    // فحص اتصال سريع للأجهزة العميلة — يعيد أيضاً اسم جهاز المضيف ليعرفه العميل
     srvApp.get('/ping', (req, res) => {
-      res.json({ ok: true, app: 'sened', rev: currentRev(), clients: sseClients.size });
+      res.json({ ok: true, app: 'sened', name: readLanConfig().deviceName || '', rev: currentRev(), clients: sseClients.size });
     });
 
     // الحالة الكاملة الحالية (تحميل أولي لدى العميل)
@@ -162,6 +234,8 @@ function startHostServer() {
       });
       if (res.flushHeaders) res.flushHeaders();
       res.write(`event: hello\ndata: ${JSON.stringify({ rev: currentRev() })}\n\n`);
+      // اسم الجهاز العميل (من ترويسة x-sened-device) ليعرف المدير مَن المتصل
+      res._deviceName = decodeURIComponent(req.get('x-sened-device') || '') || (req.socket.remoteAddress || '').replace('::ffff:', '');
       sseClients.add(res);
       if (win) win.webContents.send('sync:updated'); // تحديث عدّاد الأجهزة المتصلة في الواجهة
       const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) {} }, 25000);
@@ -173,12 +247,14 @@ function startHostServer() {
     hostServer.listen(cfg.port, '0.0.0.0', () => {
       console.log(`Sened host server listening on ${getLocalIp()}:${cfg.port}`);
     });
+    startDiscoveryBeacon(); // يبثّ وجود الخادم على الشبكة ليكتشفه بقية الأجهزة تلقائياً
   } catch (err) {
     console.error('Failed to start host server:', err.message);
   }
 }
 
 function stopHostServer() {
+  stopDiscoveryBeacon();
   for (const res of sseClients) { try { res.end(); } catch (e) {} }
   sseClients.clear();
   if (hostServer) { try { hostServer.close(); } catch (e) {} hostServer = null; }
@@ -200,7 +276,10 @@ function connectClientStream() {
   const cfg = readLanConfig();
   if (cfg.role !== 'client' || !cfg.hostIp) return;
   const req = http.get(
-    { hostname: cfg.hostIp, port: cfg.port, path: '/events', headers: { Accept: 'text/event-stream', 'x-sened-token': cfg.token || '' } },
+    {
+      hostname: cfg.hostIp, port: cfg.port, path: '/events',
+      headers: { Accept: 'text/event-stream', 'x-sened-token': cfg.token || '', 'x-sened-device': encodeURIComponent(cfg.deviceName || '') }
+    },
     (res) => {
       if (res.statusCode !== 200) { res.resume(); clientConnected = false; scheduleClientReconnect(); return; }
       clientConnected = true;
@@ -1013,7 +1092,13 @@ ipcMain.handle('deviceRole:set', (e, role) => writeDeviceRole(role));
 ipcMain.handle('deviceRole:clear', () => writeDeviceRole(null));
 ipcMain.handle('lan:getConfig', () => readLanConfig());
 ipcMain.handle('lan:setConfig', (e, cfg) => {
-  const next = writeLanConfig({ role: cfg.role || 'off', hostIp: (cfg.hostIp || '').trim(), port: cfg.port || SYNC_PORT_DEFAULT, token: (cfg.token || '').trim() });
+  let token = (cfg.token || '').trim();
+  // كود الاقتران: يتولّد تلقائياً على المضيف إن تُرك فارغاً (6 أرقام يعرضها للأجهزة الأخرى)
+  if ((cfg.role || 'off') === 'host' && !token) token = String(crypto.randomInt(100000, 999999));
+  const next = writeLanConfig({
+    role: cfg.role || 'off', hostIp: (cfg.hostIp || '').trim(), port: cfg.port || SYNC_PORT_DEFAULT,
+    token, deviceName: (cfg.deviceName || '').trim().slice(0, 40)
+  });
   applyLanMode();
   return { ok: true, config: next, myIp: getLocalIp() };
 });
@@ -1021,10 +1106,14 @@ ipcMain.handle('lan:status', () => {
   const cfg = readLanConfig();
   return {
     role: cfg.role, hostIp: cfg.hostIp, port: cfg.port, myIp: getLocalIp(),
+    deviceName: cfg.deviceName || '', token: cfg.token || '',
     serverRunning: !!hostServer, connectedClients: sseClients.size,
+    clientNames: [...sseClients].map(r => r._deviceName || '').filter(Boolean),
     clientConnected, rev: currentRev()
   };
 });
+// البحث عن خوادم سند على الشبكة المحلية (اكتشاف تلقائي عبر UDP)
+ipcMain.handle('lan:discover', () => discoverHosts(3000));
 ipcMain.handle('lan:test', (e, { ip, port, token }) => new Promise((resolve) => {
   const req = http.get({ hostname: ip, port: port || SYNC_PORT_DEFAULT, path: '/ping', timeout: 2500, headers: { 'x-sened-token': token || '' } }, (res) => {
     let b = ''; res.setEncoding('utf8'); res.on('data', c => b += c);

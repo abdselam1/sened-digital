@@ -108,6 +108,8 @@
         <button class="foot-btn" onclick="lockApp()"><span class="ic">🔒</span><span data-i18n="lock"></span></button>
         <button class="foot-btn" onclick="logoutApp()"><span class="ic">⏻</span><span data-i18n="logout"></span></button>
         <div class="ai-badge"><span class="dot" id="aiDot"></span><span id="aiStatus"></span></div>
+        <!-- مؤشر حالة التزامن عبر الشبكة: يظهر فقط عند تفعيل وضع مضيف/متصل -->
+        <div class="ai-badge" id="syncBadge" style="display:none"><span class="dot" id="syncDot"></span><span id="syncStatusText"></span></div>
       </div>
     </aside>
 
@@ -312,21 +314,30 @@
               <option value="client" data-i18n="lanRoleClient"></option>
             </select>
           </div>
-          <div id="lanTokenBox" style="display:none;margin-top:10px">
-            <label data-i18n="lanTokenLabel"></label>
-            <input type="text" id="lanToken" data-i18n-ph="lanTokenPh" style="direction:ltr;text-align:left">
-            <p class="muted" data-i18n="lanTokenHint" style="margin:6px 0 0"></p>
+          <div id="lanNameBox" style="display:none;margin-top:10px">
+            <label data-i18n="lanDeviceName"></label>
+            <input type="text" id="lanDeviceName" data-i18n-ph="lanDeviceNamePh" maxlength="40">
+            <p class="muted" data-i18n="lanDeviceNameHint" style="margin:6px 0 0"></p>
           </div>
           <div id="lanHostBox" style="display:none;margin-top:10px;background:rgba(200,164,92,0.08);padding:14px;border-radius:8px;border:1px solid var(--gold)">
             <p class="muted" data-i18n="lanHostHint" style="margin:0 0 6px"></p>
             <div id="lanMyAddress" style="font-size:22px;font-weight:bold;color:var(--gold);direction:ltr;text-align:center">—</div>
-            <p class="muted" style="margin:8px 0 0"><span data-i18n="lanConnectedClients"></span>: <b id="lanClientCount">0</b></p>
+            <p class="muted" data-i18n="lanPairCodeHostHint" style="margin:10px 0 4px"></p>
+            <div id="lanPairCodeShow" style="font-size:26px;font-weight:bold;letter-spacing:6px;color:var(--gold);direction:ltr;text-align:center">—</div>
+            <p class="muted" style="margin:8px 0 0"><span data-i18n="lanConnectedClients"></span>: <b id="lanClientCount">0</b> <span id="lanClientNames" class="muted"></span></p>
           </div>
           <div id="lanClientBox" style="display:none;margin-top:10px">
-            <p class="muted" data-i18n="lanClientHint" style="margin:0 0 6px"></p>
+            <button class="btn btn-gold" onclick="discoverLanHosts()" style="width:100%" id="lanDiscoverBtn" data-i18n="lanDiscoverBtn"></button>
+            <div id="lanDiscoveryList" style="margin-top:8px"></div>
+            <p class="muted" data-i18n="lanClientHint" style="margin:10px 0 6px"></p>
             <div style="display:flex;gap:10px">
               <input type="text" id="lanHostIp" placeholder="192.168.1.10" style="flex:1;direction:ltr;text-align:left">
               <button class="btn btn-ghost" onclick="testLanHost()" data-i18n="lanTestBtn"></button>
+            </div>
+            <div class="field" style="margin-top:10px">
+              <label data-i18n="lanPairCodeLabel"></label>
+              <input type="text" id="lanToken" data-i18n-ph="lanPairCodePh" style="direction:ltr;text-align:center;letter-spacing:4px" maxlength="20">
+              <p class="muted" data-i18n="lanPairCodeHint" style="margin:6px 0 0"></p>
             </div>
             <p id="lanClientStatus" style="margin:8px 0 0"></p>
           </div>
