@@ -157,6 +157,8 @@ function applyPermissions() {
   const label = $('currentUserLabel');
   if (label) label.textContent = `${currentUserName} — ${T['role' + currentRole.charAt(0).toUpperCase() + currentRole.slice(1)] || currentRole}`;
   applyLanHostOptionVisibility();
+  // بطاقة الربط الأولى للكاشير (فوق صفحة الفواتير): تُقيَّم عند كل دخول/تغيير دور
+  refreshLanSetupCard();
   // إن كانت الصفحة الحالية غير مسموحة، ارجع للوحة التحكم
   const activePage = document.querySelector('.page.active');
   if (activePage && allowed && !allowed.includes(activePage.id.replace('page-', ''))) goPage('dashboard');
@@ -1982,6 +1984,7 @@ async function refreshLanUI() {
 
 // مؤشر حالة التزامن الدائم في الشريط الجانبي (أخضر = متزامن، أحمر = انقطع)
 function updateSyncBadge(cfg, st) {
+  updateOfflineBar(cfg, st);
   const badge = $('syncBadge'); if (!badge) return;
   if (!cfg || cfg.role === 'off') { badge.style.display = 'none'; return; }
   badge.style.display = '';
@@ -1995,6 +1998,15 @@ function updateSyncBadge(cfg, st) {
     dot.style.background = ok ? '#3ecf6f' : '#e05555';
     txt.textContent = ok ? (T.syncConnected || '') : (T.syncOffline || '');
   }
+}
+
+// شريط تحذير الانقطاع أعلى المحتوى (وضع العميل فقط): النقطة الحمراء الصغيرة في
+// syncBadge لا تكفي لكاشير مشغول بالبيع — شريط واضح يظهر عند فقدان الاتصال
+// بالخادم ويختفي عند عودته، والنقر عليه يفتح صفحة الشبكة.
+function updateOfflineBar(cfg, st) {
+  const bar = $('offlineBar'); if (!bar) return;
+  const offline = cfg && cfg.role === 'client' && st && !st.clientConnected;
+  bar.style.display = offline ? 'block' : 'none';
 }
 
 function onLanRoleChange() {
@@ -2146,23 +2158,107 @@ async function clearDeviceRole() {
   refreshDeviceRoleUI();
 }
 
-async function testLanHost() {
-  let ip = $('lanHostIp') ? $('lanHostIp').value.trim() : '';
-  if (!ip) return;
-  // العنوان قد يتضمن المنفذ بصيغة ip:منفذ (خادم على منفذ غير الافتراضي)
+// اختبار الوصول لخادم بعنوانه (قد يتضمن المنفذ بصيغة ip:منفذ) مع عرض النتيجة في عنصر حالة —
+// مشترك بين صفحة الشبكة وبطاقة الربط الأولى للكاشير
+async function lanTestAddress(addr, token, statusEl) {
+  let ip = (addr || '').trim();
+  if (!ip) return { ok: false };
   let port;
   if (ip.includes(':')) { const parts = ip.split(':'); ip = parts[0].trim(); port = parseInt(parts[1], 10) || undefined; }
-  const token = $('lanToken') ? $('lanToken').value.trim() : '';
-  if ($('lanClientStatus')) { $('lanClientStatus').textContent = '… ' + (T.lanTesting || ''); $('lanClientStatus').style.color = 'var(--muted)'; }
+  if (statusEl) { statusEl.textContent = '… ' + (T.lanTesting || ''); statusEl.style.color = 'var(--muted)'; }
   const r = await bridge.lanTest(ip, port, token);
-  if ($('lanClientStatus')) {
+  if (statusEl) {
     const msg = r.ok ? ('✓ ' + (T.lanReachable || ''))
       : (r.error === 'unauthorized'
         ? (token ? ('✗ ' + (T.lanTokenWrong || '')) : ('🔑 ' + (T.lanNeedCode || '')))
         : ('✗ ' + (T.lanUnreachable || '')));
-    $('lanClientStatus').textContent = msg;
-    $('lanClientStatus').style.color = r.ok ? 'var(--gold)' : '#e0607a';
+    statusEl.textContent = msg;
+    statusEl.style.color = r.ok ? 'var(--gold)' : '#e0607a';
   }
+  return r;
+}
+
+async function testLanHost() {
+  if (!$('lanHostIp')) return;
+  await lanTestAddress($('lanHostIp').value, $('lanToken') ? $('lanToken').value.trim() : '', $('lanClientStatus'));
+}
+
+// ---------- بطاقة الربط الأولى للكاشير (فوق صفحة الفواتير) ----------
+// تظهر إن كان الجهاز بلا إعداد شبكة (role=off) ولم يسبق تخطي الربط، ليربط الكاشير
+// جهازه بالخادم في أقل من دقيقة بلا مدير وبلا الدخول لأي إعدادات.
+// علم التخطي محلي لهذا الجهاز (localStorage) — لا يدخل البيانات المزامَنة أبداً.
+const LAN_SETUP_SKIP_KEY = 'sened-lan-setup-skipped';
+
+async function refreshLanSetupCard() {
+  const card = $('lanSetupCard'); if (!card) return;
+  let show = false;
+  try {
+    if (currentRole === 'cashier' && localStorage.getItem(LAN_SETUP_SKIP_KEY) !== '1') {
+      const cfg = await bridge.lanGetConfig();
+      show = (cfg.role || 'off') === 'off';
+    }
+  } catch (e) { /* الجسر قد لا يكون جاهزاً بعد */ }
+  card.style.display = show ? 'block' : 'none';
+}
+
+// البحث التلقائي عن الخوادم للبطاقة: نقرة على خادم تملأ العنوان وتختبره فوراً
+async function lanSetupDiscover() {
+  const list = $('lanSetupDiscoveryList'), btn = $('lanSetupDiscoverBtn');
+  if (!list) return;
+  if (btn) btn.disabled = true;
+  list.innerHTML = `<p class="muted">… ${T.lanDiscovering || ''}</p>`;
+  try {
+    const hosts = await bridge.lanDiscover();
+    if (!hosts.length) {
+      list.innerHTML = `<p class="muted">${T.lanDiscoverNone || ''}</p>`;
+    } else {
+      list.innerHTML = hosts.map(h =>
+        `<button class="btn btn-ghost" style="width:100%;margin-top:6px;justify-content:space-between;display:flex"
+           onclick="lanSetupPick('${esc(h.ip)}', ${Number(h.port) || 3050})">
+           <span>◈ ${esc(h.name) || (T.lanRoleHost || '')}</span><span dir="ltr" class="muted">${esc(h.ip)}</span>
+         </button>`).join('');
+    }
+  } catch (e) { list.innerHTML = `<p class="muted">${T.lanDiscoverNone || ''}</p>`; }
+  if (btn) btn.disabled = false;
+}
+
+function lanSetupPick(ip, port) {
+  if ($('lanSetupHostIp')) $('lanSetupHostIp').value = (port && port !== 3050) ? `${ip}:${port}` : ip;
+  lanSetupTest();
+}
+
+async function lanSetupTest() {
+  return lanTestAddress($('lanSetupHostIp') ? $('lanSetupHostIp').value : '', $('lanSetupToken') ? $('lanSetupToken').value.trim() : '', $('lanSetupStatus'));
+}
+
+// حفظ الربط بدور «جهاز متصل» (client) — الدور مسموح لكل المستخدمين، لا يحتاج مديراً
+async function lanSetupSave() {
+  let hostIp = $('lanSetupHostIp') ? $('lanSetupHostIp').value.trim() : '';
+  const token = $('lanSetupToken') ? $('lanSetupToken').value.trim() : '';
+  if (!hostIp) {
+    if ($('lanSetupStatus')) { $('lanSetupStatus').textContent = '✗ ' + (T.lanSetupNoAddress || ''); $('lanSetupStatus').style.color = '#e0607a'; }
+    return;
+  }
+  const cur = await bridge.lanGetConfig();
+  let port = cur.port || 3050;
+  if (hostIp.includes(':')) {
+    const parts = hostIp.split(':');
+    hostIp = parts[0].trim();
+    port = parseInt(parts[1], 10) || port;
+  }
+  await bridge.lanSetConfig({ role: 'client', hostIp, token, deviceName: cur.deviceName || '', port });
+  toast(T.saved);
+  // تحميل حالة الخادم فور الربط ليرى الكاشير بيانات المتجر مباشرة
+  DB = await bridge.loadData();
+  renderAll();
+  refreshLanSetupCard();
+  setTimeout(refreshLanUI, 500);
+}
+
+// «تخطّي — العمل بدون شبكة»: يخفي البطاقة نهائياً على هذا الجهاز فقط
+function lanSetupSkip() {
+  try { localStorage.setItem(LAN_SETUP_SKIP_KEY, '1'); } catch (e) {}
+  if ($('lanSetupCard')) $('lanSetupCard').style.display = 'none';
 }
 
 function sampleInvoiceForPreview() {

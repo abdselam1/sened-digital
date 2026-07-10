@@ -117,6 +117,12 @@
     <!-- المحتوى -->
     <main class="main">
 
+      <!-- شريط تحذير الانقطاع (وضع العميل): ثابت أعلى المحتوى عند فقدان الاتصال بالخادم —
+           النقطة الصغيرة في syncBadge لا تكفي لكاشير مشغول بالبيع. النقر يفتح صفحة الشبكة. -->
+      <div id="offlineBar" class="offline-bar" onclick="goPage('network')">
+        ⚠ <span data-i18n="offlineBarText"></span> — <u data-i18n="offlineBarAction"></u>
+      </div>
+
       <!-- لوحة التحكم -->
       <section class="page active" id="page-dashboard">
         <div class="page-head"><h2 class="page-title" data-i18n="dashboard"></h2></div>
@@ -130,6 +136,29 @@
 
       <!-- المبيعات / الفواتير -->
       <section class="page" id="page-invoices">
+        <!-- بطاقة الربط الأولى (للكاشير): تظهر إن كان الجهاز بلا إعداد شبكة (role=off)
+             ولم يسبق تخطي الربط — يربط الكاشير جهازه بالخادم بلا مدير وبلا دخول للإعدادات.
+             علم التخطي محلي لهذا الجهاز ولا يدخل البيانات المزامَنة. -->
+        <div id="lanSetupCard" class="panel" style="display:none;border:1px solid var(--gold);margin-bottom:18px">
+          <h3>⇌ <span data-i18n="lanSetupTitle"></span></h3>
+          <p class="muted" data-i18n="lanSetupIntro" style="margin:6px 0 12px"></p>
+          <button class="btn btn-gold" id="lanSetupDiscoverBtn" onclick="lanSetupDiscover()" style="width:100%" data-i18n="lanDiscoverBtn"></button>
+          <div id="lanSetupDiscoveryList" style="margin-top:8px"></div>
+          <div class="field" style="margin-top:10px">
+            <label data-i18n="lanClientHint"></label>
+            <input type="text" id="lanSetupHostIp" placeholder="192.168.1.10" style="direction:ltr;text-align:left">
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label data-i18n="lanPairCodeLabel"></label>
+            <input type="text" id="lanSetupToken" data-i18n-ph="lanPairCodePh" style="direction:ltr;text-align:center;letter-spacing:4px" maxlength="20">
+          </div>
+          <p id="lanSetupStatus" style="margin:8px 0 0"></p>
+          <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="lanSetupTest()" data-i18n="lanTestBtn"></button>
+            <button class="btn btn-gold" onclick="lanSetupSave()" data-i18n="lanSetupConnectBtn"></button>
+            <button class="btn btn-ghost" onclick="lanSetupSkip()" style="margin-inline-start:auto" data-i18n="lanSetupSkipBtn"></button>
+          </div>
+        </div>
         <div class="page-head">
           <h2 class="page-title" data-i18n="invoices"></h2>
           <div style="display:flex;gap:8px">

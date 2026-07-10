@@ -1,7 +1,7 @@
 {
   "name": "sened",
   "productName": "سند",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "سند — نظام إدارة ومحاسبة ذكي ثلاثي اللغة مدعوم بالذكاء الاصطناعي وبوت تلجرام | Sened — AI-powered trilingual business management & accounting system",
   "main": "main.js",
   "author": "abdselam1",

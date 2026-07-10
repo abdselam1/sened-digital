@@ -202,13 +202,55 @@ function broadcastToClients(payloadStr) {
   }
 }
 
+// ==========================================================================
+//  طابور إعادة الإرسال (pending-sync.json) — منع ضياع فواتير الانقطاع
+//  لو أصدر الكاشير فواتير والخادم متوقف، تُحفَظ محلياً فقط؛ وبدون هذا الطابور
+//  كان أول بث من المضيف بعد عودة الاتصال يكتب حالته فوق الملف المحلي فتضيع
+//  الفواتير نهائياً بلا تنبيه. الحل: كل POST فاشل يخزّن لقطة الحالة كاملة في
+//  ملف محلي يصمد أمام إعادة التشغيل، وتُرسَل للمضيف عند أول اتصال ناجح.
+//  الملف محلي لكل جهاز مثل lan-config.json — لا يدخل البيانات المزامَنة أبداً.
+// ==========================================================================
+const PENDING_SYNC_FILE = () => path.join(app.getPath('userData'), 'pending-sync.json');
+function readPendingSync() {
+  try {
+    if (fs.existsSync(PENDING_SYNC_FILE())) return JSON.parse(fs.readFileSync(PENDING_SYNC_FILE(), 'utf8'));
+  } catch (e) { console.error('pending sync read error', e.message); }
+  return null;
+}
+function writePendingSync(data) {
+  try { fs.writeFileSync(PENDING_SYNC_FILE(), JSON.stringify(data, null, 2), 'utf8'); }
+  catch (e) { console.error('pending sync write error', e.message); }
+}
+function clearPendingSync() {
+  try { if (fs.existsSync(PENDING_SYNC_FILE())) fs.unlinkSync(PENDING_SYNC_FILE()); } catch (e) {}
+}
+
+// إرسال الطابور للمضيف: يُستدعى فور نجاح الاتصال وقبل تطبيق أي بث وارد يمحوه.
+// إن فشل الإرسال والاتصال ما زال قائماً (حالة نادرة: SSE يعمل وPOST يُرفض)
+// يعيد المحاولة كل 5 ثوانٍ — الملف لا يُمسح إلا بوصول حالة أحدث للمضيف.
+let pendingFlushTimer = null;
+function flushPendingSync() {
+  const pending = readPendingSync();
+  if (!pending) return;
+  postToHost(pending, {
+    isPendingFlush: true,
+    onFail: () => {
+      if (pendingFlushTimer) return;
+      pendingFlushTimer = setTimeout(() => {
+        pendingFlushTimer = null;
+        if (clientConnected) flushPendingSync();
+      }, 5000);
+    }
+  });
+}
+
 // إرسال تعديل من العميل إلى المضيف (المضيف يخزّن ويبثّ للجميع)
 // عند الفشل لا نكتفي بالسجل: نبلّغ الواجهة (sync:postFailed) لعرض تنبيه واضح للمستخدم،
 // وإلا ظنّ المحاسب أن قيده وصل للخادم بينما الاتصال منقطع.
 function notifySyncPostFailed() {
   try { if (win && !win.isDestroyed()) win.webContents.send('sync:postFailed'); } catch (e) {}
 }
-function postToHost(data) {
+function postToHost(data, opts = {}) {
   const cfg = readLanConfig();
   if (!cfg.hostIp) return;
   let failNotified = false; // الفشل قد يصل من أكثر من حدث (timeout ثم error) — تنبيه واحد يكفي
@@ -216,7 +258,11 @@ function postToHost(data) {
     if (failNotified) return;
     failNotified = true;
     console.error('post to host error:', msg);
+    // الحالة لم تصل للمضيف: تُحفَظ في طابور إعادة الإرسال كي لا يمحوها أول بث بعد
+    // عودة الاتصال. (إعادة إرسال طابور قائم لا تعيد كتابته كي لا تدهس حفظاً أحدث)
+    if (!opts.isPendingFlush) writePendingSync(data);
     notifySyncPostFailed();
+    if (opts.onFail) opts.onFail(msg);
   };
   try {
     const req = http.request({
@@ -228,6 +274,8 @@ function postToHost(data) {
     }, (res) => {
       // رفض المضيف (401 رمز خاطئ / خطأ خادم) فشلٌ أيضاً وإن نجح الاتصال شبكياً
       if (res.statusCode !== 200) fail('http ' + res.statusCode);
+      // وصلت حالة أحدث للمضيف — أي طابور سابق أصبح متجاوَزاً (آخر إرسال يفوز)
+      else clearPendingSync();
       res.resume();
     });
     req.on('error', (e) => fail(e.message));
@@ -350,6 +398,7 @@ function stopHostServer() {
 function stopClientSync() {
   clientConnected = false;
   if (clientReconnectTimer) { clearTimeout(clientReconnectTimer); clientReconnectTimer = null; }
+  if (pendingFlushTimer) { clearTimeout(pendingFlushTimer); pendingFlushTimer = null; }
   if (clientStream) { try { clientStream.destroy(); } catch (e) {} clientStream = null; }
 }
 
@@ -370,6 +419,9 @@ function connectClientStream() {
     (res) => {
       if (res.statusCode !== 200) { res.resume(); clientConnected = false; scheduleClientReconnect(); return; }
       clientConnected = true;
+      // أول اتصال ناجح: أرسل أي حالة محلية لم تصل أثناء الانقطاع (فواتير الكاشير)
+      // قبل تطبيق أي بث وارد من المضيف يكتب فوقها — وإلا ضاعت بلا تنبيه.
+      flushPendingSync();
       if (win) win.webContents.send('sync:updated'); // تحديث مؤشر الاتصال
       let buffer = '';
       res.setEncoding('utf8');
