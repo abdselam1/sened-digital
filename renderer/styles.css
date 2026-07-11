@@ -531,8 +531,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold); box-shado
   body * { visibility: hidden; }
   body { overflow: visible; background: #fff; }
   #print-area, #print-area * { visibility: visible; }
+  /* الحركات لا تُشغَّل في الطباعة/printToPDF فتبقى العناصر عالقة عند إطارها الأول —
+     حركة tableIn/rowIn تبدأ من opacity:0 فكان جدول المنتجات يختفي كلياً من PDF والطباعة. */
+  #print-area, #print-area * { animation: none !important; transition: none !important; }
+  /* بلا bottom حتى يمتد المحتوى الطويل لعدة صفحات بدل انحصاره في ارتفاع صفحة واحدة */
   /* لون/خلفية صريحان حتى لا يرث محتوى الطباعة نص المظهر الليلي شبه الأبيض على خلفية بيضاء */
-  #print-area { display: block; position: absolute; inset: 0; padding: 40px; background: #fff; color: #111; }
+  #print-area { display: block; position: absolute; top: 0; left: 0; right: 0; padding: 40px; background: #fff; color: #111; }
   #print-area table { background: #fff; }
   #print-area th { background: #f0f0f0; color: #111; }
 }
