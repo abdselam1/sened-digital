@@ -6,6 +6,9 @@ const https = require('https');
 const crypto = require('crypto');
 const os = require('os');
 
+// لأغراض الاختبار والدعم فقط: تشغيل نسخة ثانية ببيانات معزولة على نفس الجهاز
+if (process.env.SENED_USERDATA) app.setPath('userData', process.env.SENED_USERDATA);
+
 function getLocalIp() {
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {
@@ -14,6 +17,173 @@ function getLocalIp() {
     }
   }
   return '127.0.0.1';
+}
+
+// ==========================================================================
+//  التخزين — قاعدة بيانات SQLite على مستوى السجل (منذ v1.1.0)
+//  كل سجل (فاتورة/منتج/زبون/…) صفٌّ مستقل في جدول records، والإعدادات والعدّادات
+//  صفوف من نوع _kv. الواجهة وبقية main.js تبقى تتعامل بـ"مستند كامل" عبر getDoc/saveData —
+//  طبقة التخزين تحسب الفروقات على مستوى السجل، وهذه الفروقات نفسها هي وحدة التزامن
+//  عبر الشبكة (بدل بثّ المستند الكامل). الحذف يُخزَّن شاهدةً (deleted=1) كي ينتشر للأجهزة.
+//  ملف sened-data.json القديم يُرحَّل تلقائياً عند أول تشغيل ثم يُعاد تسميته .pre-sqlite.
+// ==========================================================================
+const KV_COLLECTION = '_kv';
+const RECORD_COLLECTIONS = ['products', 'customers', 'invoices', 'expenses', 'quotes',
+  'purchases', 'suppliers', 'employees', 'shareholders', 'withdrawals',
+  'wallets', 'walletTx', 'auditLog', 'trash', 'returns'];
+const DB_FILE = () => path.join(app.getPath('userData'), 'sened.db');
+
+let sdb = null;                 // اتصال قاعدة البيانات (يُفتح في initStorage عند الإقلاع)
+const storeCache = new Map();   // col -> Map(id -> jsonString) — السجلات الحيّة فقط (بترتيب الإدراج)
+let kvCache = { settings: '', counters: '' };
+let storeRev = 0;               // رقم المراجعة (يقود التزامن)
+let docMemo = null;             // ذاكرة مؤقتة للمستند المجمَّع — تُبطل عند أي تغيير
+
+function metaGet(k) { const r = sdb.prepare('SELECT value FROM meta WHERE key=?').get(k); return r ? r.value : null; }
+function metaSet(k, v) { sdb.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v)); }
+
+function initStorage() {
+  const Database = require('better-sqlite3');
+  sdb = new Database(DB_FILE());
+  sdb.pragma('journal_mode = WAL');
+  sdb.exec(`CREATE TABLE IF NOT EXISTS records(
+      collection TEXT NOT NULL, id TEXT NOT NULL, updatedAt TEXT NOT NULL,
+      deleted INTEGER NOT NULL DEFAULT 0, data TEXT,
+      PRIMARY KEY(collection, id));
+    CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);`);
+  for (const col of RECORD_COLLECTIONS) storeCache.set(col, new Map());
+  // الترتيب بـ rowid = ترتيب الإدراج الأصلي (ON CONFLICT DO UPDATE يحافظ على rowid)
+  for (const row of sdb.prepare('SELECT collection, id, data, deleted FROM records ORDER BY rowid').iterate()) {
+    if (row.deleted) continue;
+    if (row.collection === KV_COLLECTION) { kvCache[row.id] = row.data || ''; continue; }
+    let m = storeCache.get(row.collection);
+    if (!m) { m = new Map(); storeCache.set(row.collection, m); }
+    m.set(row.id, row.data);
+  }
+  storeRev = parseInt(metaGet('rev') || '0', 10) || 0;
+  migrateJsonIfNeeded();
+}
+
+// ترحيل تلقائي من ملف sened-data.json القديم عند أول تشغيل بعد الترقية
+function migrateJsonIfNeeded() {
+  if (metaGet('migrated')) return;
+  try {
+    if (fs.existsSync(DATA_FILE())) {
+      const doc = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
+      applyChangesLocal(diffDocToChanges(doc), {});
+      storeRev = (doc && doc._rev) || 0; metaSet('rev', storeRev);
+      // الملف القديم يبقى نسخة أمان باسم واضح — لن يُقرأ بعد الآن
+      try { fs.renameSync(DATA_FILE(), DATA_FILE() + '.pre-sqlite'); } catch (e) {}
+      console.log('migrated sened-data.json to SQLite, rev', storeRev);
+    }
+  } catch (e) { console.error('migration error', e); }
+  metaSet('migrated', new Date().toISOString());
+}
+
+function ensureId(item) { if (!item.id) item.id = crypto.randomUUID(); return String(item.id); }
+
+// يطبّق قائمة تغييرات على القاعدة والذاكرة (معاملة واحدة). التغيير: {col, id, data|null}.
+// data=null حذفٌ (شاهدة). يعيد التغييرات التي بدّلت شيئاً فعلاً (لتجنّب بثّ ما لم يتغيّر).
+// bumpRev: يرفع رقم المراجعة (مضيف/مستقل) — setRev: يتبنى رقم المضيف (عميل).
+function applyChangesLocal(changes, opts = {}) {
+  if (!sdb) return [];
+  changes = changes || [];
+  const applied = [];
+  const upsert = sdb.prepare(`INSERT INTO records(collection,id,updatedAt,deleted,data) VALUES(?,?,?,?,?)
+    ON CONFLICT(collection,id) DO UPDATE SET updatedAt=excluded.updatedAt, deleted=excluded.deleted, data=excluded.data`);
+  const now = new Date().toISOString();
+  sdb.transaction(() => {
+    for (let ch of changes) {
+      if (!ch || !ch.col || ch.id === undefined || ch.id === null) continue;
+      const col = String(ch.col), id = String(ch.id);
+      if (col === KV_COLLECTION) {
+        let value = ch.data;
+        // العدّادات لا تتراجع أبداً: خذ الأكبر لكل عدّاد — يمنع رجوع أرقام الفواتير عند التعارض
+        if (id === 'counters' && kvCache.counters && value) {
+          try {
+            const cur = JSON.parse(kvCache.counters);
+            const merged = { ...cur };
+            for (const k of Object.keys(value)) merged[k] = Math.max(Number(cur[k]) || 0, Number(value[k]) || 0);
+            value = merged;
+          } catch (e) {}
+        }
+        const str = value === null || value === undefined ? '' : JSON.stringify(value);
+        if ((kvCache[id] || '') === str) continue;
+        kvCache[id] = str;
+        upsert.run(col, id, now, 0, str);
+        applied.push({ col, id, data: value });
+        continue;
+      }
+      let m = storeCache.get(col);
+      if (!m) { m = new Map(); storeCache.set(col, m); }
+      if (ch.data === null || ch.data === undefined) {
+        if (!m.has(id)) continue;
+        m.delete(id);
+        upsert.run(col, id, now, 1, null);
+        applied.push({ col, id, data: null });
+      } else {
+        const str = JSON.stringify(ch.data);
+        if (m.get(id) === str) continue;
+        m.set(id, str);
+        upsert.run(col, id, now, 0, str);
+        applied.push({ col, id, data: ch.data });
+      }
+    }
+    // تبنّي رقم مراجعة المضيف يحدث دائماً (حتى لو كان البثّ صدى تغييراتنا فلم يبدّل شيئاً)
+    if (opts.setRev !== undefined && (Number(opts.setRev) || 0) !== storeRev) {
+      storeRev = Number(opts.setRev) || 0; metaSet('rev', storeRev);
+    } else if (applied.length && opts.bumpRev) { storeRev++; metaSet('rev', storeRev); }
+    if (applied.length) { docMemo = null; metaSet('ts', now); }
+  })();
+  return applied;
+}
+
+// يقارن مستنداً كاملاً (كما تحفظه الواجهة) بالحالة المخزَّنة ويعيد فروقاته سجلاً سجلاً —
+// بما فيها المحذوفات (سجل مخزَّن غاب عن المستند = حُذف).
+function diffDocToChanges(doc) {
+  if (!doc || typeof doc !== 'object') return [];
+  const changes = [];
+  const cols = new Set(RECORD_COLLECTIONS);
+  for (const k of Object.keys(doc)) if (Array.isArray(doc[k])) cols.add(k);
+  for (const col of cols) {
+    const arr = Array.isArray(doc[col]) ? doc[col] : [];
+    const m = storeCache.get(col) || new Map();
+    const seen = new Set();
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+      const id = ensureId(item);
+      seen.add(id);
+      if (m.get(id) !== JSON.stringify(item)) changes.push({ col, id, data: item });
+    }
+    for (const id of m.keys()) if (!seen.has(id)) changes.push({ col, id, data: null });
+  }
+  const settingsStr = JSON.stringify(doc.settings || {});
+  if (settingsStr !== kvCache.settings) changes.push({ col: KV_COLLECTION, id: 'settings', data: doc.settings || {} });
+  const countersStr = JSON.stringify(doc.counters || {});
+  if (countersStr !== kvCache.counters) changes.push({ col: KV_COLLECTION, id: 'counters', data: doc.counters || {} });
+  return changes;
+}
+
+// يجمّع المستند الكامل من المخزن — نفس الشكل الذي اعتادته الواجهة وبقية main.js.
+// سجل التدقيق والسلة يُرتَّبان أحدثاً-أولاً لأن الواجهة تعرضهما دون فرز.
+function getDoc() {
+  if (docMemo) return docMemo;
+  const doc = {};
+  try { doc.settings = kvCache.settings ? JSON.parse(kvCache.settings) : {}; } catch (e) { doc.settings = {}; }
+  try { doc.counters = kvCache.counters ? JSON.parse(kvCache.counters) : {}; } catch (e) { doc.counters = {}; }
+  for (const [col, m] of storeCache) {
+    const arr = [];
+    for (const str of m.values()) { try { arr.push(JSON.parse(str)); } catch (e) {} }
+    doc[col] = arr;
+  }
+  for (const col of RECORD_COLLECTIONS) if (!doc[col]) doc[col] = [];
+  const byDateDesc = (field) => (a, b) => String(b[field] || '').localeCompare(String(a[field] || ''));
+  doc.auditLog.sort(byDateDesc('date'));
+  doc.trash.sort(byDateDesc('deletedAt'));
+  doc._rev = storeRev;
+  doc._ts = (sdb && metaGet('ts')) || '';
+  docMemo = doc;
+  return doc;
 }
 
 // ==========================================================================
@@ -183,22 +353,24 @@ function touchClientRegistry(name, ip) {
   else clientRegistry.set(key, { id: 0, name: name || ip, ip: ip || '', connected: false, lastSeen: Date.now() });
 }
 
-// رقم مراجعة الحالة الحالية (يقرأ من الملف المخزَّن)
-function currentRev() {
-  try {
-    if (fs.existsSync(DATA_FILE())) {
-      const d = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
-      return (d && d._rev) || 0;
-    }
-  } catch (e) {}
-  return 0;
-}
+// رقم مراجعة الحالة الحالية (من مخزن SQLite)
+function currentRev() { return storeRev; }
 
-// بثّ الحالة الكاملة لكل الأجهزة العميلة المتصلة (وضع المضيف)
-function broadcastToClients(payloadStr) {
-  const msg = `event: update\ndata: ${payloadStr}\n\n`;
+// بثّ التغييرات لكل الأجهزة العميلة المتصلة (وضع المضيف).
+// أجهزة البروتوكول 2 تستقبل التغييرات السجلّية فقط (خفيفة)، والأجهزة القديمة
+// (إصدارات ما قبل 1.1.0) تستقبل المستند الكامل كما اعتادت — توافق رجعي كامل.
+function broadcastChanges(changes) {
+  if (!sseClients.size || !changes || !changes.length) return;
+  const v2msg = `event: changes\ndata: ${JSON.stringify({ rev: storeRev, changes })}\n\n`;
+  let legacyMsg = null;
   for (const res of sseClients) {
-    try { res.write(msg); } catch (e) { /* اتصال مقطوع؛ يُنظَّف عند حدث close */ }
+    try {
+      if (res._proto2) res.write(v2msg);
+      else {
+        if (!legacyMsg) legacyMsg = `event: update\ndata: ${JSON.stringify(getDoc())}\n\n`;
+        res.write(legacyMsg);
+      }
+    } catch (e) { /* اتصال مقطوع؛ يُنظَّف عند حدث close */ }
   }
 }
 
@@ -209,6 +381,8 @@ function broadcastToClients(payloadStr) {
 //  الفواتير نهائياً بلا تنبيه. الحل: كل POST فاشل يخزّن لقطة الحالة كاملة في
 //  ملف محلي يصمد أمام إعادة التشغيل، وتُرسَل للمضيف عند أول اتصال ناجح.
 //  الملف محلي لكل جهاز مثل lan-config.json — لا يدخل البيانات المزامَنة أبداً.
+//  منذ v1.1.0 يخزّن قائمة تغييرات سجلّية {changes:[…]} بدل لقطة المستند الكاملة؛
+//  التغييرات المتراكمة تُدمج بالمعرّف (آخر تغيير لكل سجل يفوز).
 // ==========================================================================
 const PENDING_SYNC_FILE = () => path.join(app.getPath('userData'), 'pending-sync.json');
 function readPendingSync() {
@@ -224,6 +398,14 @@ function writePendingSync(data) {
 function clearPendingSync() {
   try { if (fs.existsSync(PENDING_SYNC_FILE())) fs.unlinkSync(PENDING_SYNC_FILE()); } catch (e) {}
 }
+// يضيف تغييرات فشل إرسالها إلى الطابور، مدموجة بالمعرّف فوق ما سبق
+function appendPendingChanges(changes) {
+  const cur = readPendingSync();
+  const map = new Map();
+  if (cur && Array.isArray(cur.changes)) for (const ch of cur.changes) map.set(ch.col + '|' + ch.id, ch);
+  for (const ch of changes) map.set(ch.col + '|' + ch.id, ch);
+  writePendingSync({ changes: [...map.values()] });
+}
 
 // إرسال الطابور للمضيف: يُستدعى فور نجاح الاتصال وقبل تطبيق أي بث وارد يمحوه.
 // إن فشل الإرسال والاتصال ما زال قائماً (حالة نادرة: SSE يعمل وPOST يُرفض)
@@ -232,7 +414,9 @@ let pendingFlushTimer = null;
 function flushPendingSync() {
   const pending = readPendingSync();
   if (!pending) return;
-  postToHost(pending, {
+  // طابور من إصدار سابق (لقطة مستند كاملة) يُرسَل كما هو — المضيف يقبل الشكلين
+  const payload = Array.isArray(pending.changes) ? { changes: pending.changes } : pending;
+  postToHost(payload, {
     isPendingFlush: true,
     onFail: () => {
       if (pendingFlushTimer) return;
@@ -260,7 +444,10 @@ function postToHost(data, opts = {}) {
     console.error('post to host error:', msg);
     // الحالة لم تصل للمضيف: تُحفَظ في طابور إعادة الإرسال كي لا يمحوها أول بث بعد
     // عودة الاتصال. (إعادة إرسال طابور قائم لا تعيد كتابته كي لا تدهس حفظاً أحدث)
-    if (!opts.isPendingFlush) writePendingSync(data);
+    if (!opts.isPendingFlush) {
+      if (Array.isArray(data.changes)) appendPendingChanges(data.changes);
+      else writePendingSync(data);
+    }
     notifySyncPostFailed();
     if (opts.onFail) opts.onFail(msg);
   };
@@ -307,27 +494,27 @@ function startHostServer() {
       res.json({ ok: true, app: 'sened', name: readLanConfig().deviceName || '', rev: currentRev(), clients: sseClients.size });
     });
 
-    // الحالة الكاملة الحالية (تحميل أولي لدى العميل)
+    // الحالة الكاملة الحالية (تحميل أولي لدى العميل) — تُجمَّع من مخزن SQLite
     srvApp.get('/sync', (req, res) => {
-      try {
-        if (fs.existsSync(DATA_FILE())) res.type('application/json').send(fs.readFileSync(DATA_FILE(), 'utf8'));
-        else res.json({});
-      } catch (e) { res.status(500).json({ error: e.message }); }
+      try { res.json(getDoc()); }
+      catch (e) { res.status(500).json({ error: e.message }); }
     });
 
-    // العميل يرسل تعديلاً: المضيف مصدر الحقيقة — يخزّن، يرفع رقم المراجعة، يبثّ للجميع
+    // العميل يرسل تعديلاً: المضيف مصدر الحقيقة — يطبّق، يرفع رقم المراجعة، يبثّ للجميع.
+    // الشكل الجديد: {changes:[{col,id,data|null}]} — سجلّي. الشكل القديم (مستند كامل من
+    // إصدارات ما قبل 1.1.0) يُحوَّل لفروقات سجلّية بالمقارنة مع المخزن.
     srvApp.post('/sync', (req, res) => {
       try {
-        const incoming = req.body || {};
-        incoming._rev = currentRev() + 1;
-        incoming._ts = new Date().toISOString();
-        const str = JSON.stringify(incoming, null, 2);
-        fs.writeFileSync(DATA_FILE(), str, 'utf8');
-        res.json({ ok: true, rev: incoming._rev });
+        const body = req.body || {};
+        const changes = Array.isArray(body.changes) ? body.changes : diffDocToChanges(body);
+        const applied = applyChangesLocal(changes, { bumpRev: true });
+        res.json({ ok: true, rev: storeRev });
         // تحديث «آخر ظهور» للجهاز المرسِل في جدول الأجهزة المتصلة
         touchClientRegistry(decodeURIComponent(req.get('x-sened-device') || ''), (req.socket.remoteAddress || '').replace('::ffff:', ''));
-        broadcastToClients(JSON.stringify(incoming));
-        if (win) win.webContents.send('sync:updated');
+        if (applied.length) {
+          broadcastChanges(applied);
+          if (win) win.webContents.send('sync:updated');
+        }
       } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
@@ -340,6 +527,8 @@ function startHostServer() {
         'Access-Control-Allow-Origin': '*'
       });
       if (res.flushHeaders) res.flushHeaders();
+      // العميل الذي يعلن البروتوكول 2 يستقبل تغييرات سجلّية بدل المستند الكامل
+      res._proto2 = req.get('x-sened-proto') === '2';
       res.write(`event: hello\ndata: ${JSON.stringify({ rev: currentRev() })}\n\n`);
       // اسم الجهاز العميل (من ترويسة x-sened-device) ليعرف المدير مَن المتصل
       const clientIp = (req.socket.remoteAddress || '').replace('::ffff:', '');
@@ -407,14 +596,24 @@ function scheduleClientReconnect() {
   clientReconnectTimer = setTimeout(() => { clientReconnectTimer = null; connectClientStream(); }, 3000);
 }
 
-// وضع العميل: يفتح مجرى SSE ويطبّق كل تحديث يبثّه المضيف على الملف المحلي
+// مزامنة شفاء: يسحب الحالة الكاملة من المضيف ويطبّقها سجلاً سجلاً —
+// تُستدعى عند اكتشاف فجوة في أرقام المراجعة (فاتت العميلَ أحداثٌ أثناء الانقطاع)
+function resyncFromHost() {
+  pullFromHost().then((remote) => {
+    if (!remote) return;
+    const applied = applyChangesLocal(diffDocToChanges(remote), { setRev: remote._rev || 0 });
+    if (applied.length && win && !win.isDestroyed()) win.webContents.send('sync:updated');
+  });
+}
+
+// وضع العميل: يفتح مجرى SSE ويطبّق كل تحديث يبثّه المضيف على المخزن المحلي
 function connectClientStream() {
   const cfg = readLanConfig();
   if (cfg.role !== 'client' || !cfg.hostIp) return;
   const req = http.get(
     {
       hostname: cfg.hostIp, port: cfg.port, path: '/events',
-      headers: { Accept: 'text/event-stream', 'x-sened-token': cfg.token || '', 'x-sened-device': encodeURIComponent(cfg.deviceName || '') }
+      headers: { Accept: 'text/event-stream', 'x-sened-token': cfg.token || '', 'x-sened-device': encodeURIComponent(cfg.deviceName || ''), 'x-sened-proto': '2' }
     },
     (res) => {
       if (res.statusCode !== 200) { res.resume(); clientConnected = false; scheduleClientReconnect(); return; }
@@ -435,13 +634,26 @@ function connectClientStream() {
             if (ln.startsWith('event:')) event = ln.slice(6).trim();
             else if (ln.startsWith('data:')) data += ln.slice(5).trim();
           }
-          if (event === 'update' && data) {
-            try {
+          try {
+            if (event === 'hello' && data) {
+              // رقم مراجعة المضيف عند الاتصال: إن خالف رقمنا فقد فاتتنا أحداث — اسحب الحالة كاملة
+              const hello = JSON.parse(data);
+              if (Number(hello.rev) !== storeRev) resyncFromHost();
+            } else if (event === 'changes' && data) {
+              // البروتوكول السجلّي (v1.1.0): طبّق التغييرات فقط وتبنَّ رقم مراجعة المضيف.
+              // فجوة أكبر من حدث واحد = فاتنا بثٌّ ما — اشفِ بالمزامنة الكاملة بعد التطبيق.
               const parsed = JSON.parse(data);
-              fs.writeFileSync(DATA_FILE(), JSON.stringify(parsed, null, 2), 'utf8');
+              const gap = Number(parsed.rev) - storeRev;
+              applyChangesLocal(parsed.changes || [], { setRev: parsed.rev });
+              if (gap > 1) resyncFromHost();
               if (win) win.webContents.send('sync:updated');
-            } catch (e) { console.error('client apply error:', e.message); }
-          }
+            } else if (event === 'update' && data) {
+              // مضيف قديم (ما قبل 1.1.0): مستند كامل — حوّله لفروقات وطبّقها
+              const parsed = JSON.parse(data);
+              applyChangesLocal(diffDocToChanges(parsed), { setRev: parsed._rev || 0 });
+              if (win) win.webContents.send('sync:updated');
+            }
+          } catch (e) { console.error('client apply error:', e.message); }
         }
       });
       res.on('end', () => { clientConnected = false; if (win) win.webContents.send('sync:updated'); scheduleClientReconnect(); });
@@ -608,17 +820,10 @@ const DEFAULT_DATA = {
   counters: { invoice: 1, purchase: 1, quote: 1 }
 };
 
-// قراءة متزامنة للملف المحلي فقط (في وضع العميل يبقى محدَّثاً عبر مجرى SSE).
+// قراءة متزامنة من المخزن المحلي فقط (في وضع العميل يبقى محدَّثاً عبر مجرى SSE).
 // المتصفح/الواجهة تستخدم loadDataForRenderer التي تسحب من المضيف أولاً عند العميل.
 function loadData() {
-  let localData = null;
-  try {
-    if (fs.existsSync(DATA_FILE())) {
-      localData = JSON.parse(fs.readFileSync(DATA_FILE(), 'utf8'));
-    }
-  } catch (e) { console.error('local load error', e); }
-
-  const saved = localData || {};
+  const saved = sdb ? getDoc() : {};
   const savedAuth = (saved.settings && saved.settings.auth) || null;
   const auth = (savedAuth && savedAuth.passwordHash)
     ? { enabled: !!savedAuth.enabled, username: savedAuth.username || 'admin', salt: savedAuth.salt, passwordHash: savedAuth.passwordHash }
@@ -637,19 +842,16 @@ function loadData() {
   };
 }
 
+// الحفظ: تُحسب فروقات المستند سجلاً سجلاً وتُطبَّق محلياً، ثم لا يعبر الشبكةَ
+// إلا ما تغيّر فعلاً (فاتورة واحدة بدل قاعدة البيانات كلها).
 function saveData(data) {
   const lan = readLanConfig();
-  // العميل ليس مصدر الحقيقة: يرسل التعديل للمضيف الذي يخزّنه ويبثّه للجميع،
-  // ويكتب نسخة محلية مؤقتة يصحّحها البثّ العائد من المضيف.
-  if (lan.role === 'client' && lan.hostIp) {
-    postToHost(data);
-    try { fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8'); } catch (e) {}
-    return;
-  }
-  // المضيف: ارفع رقم المراجعة ثم ابثّ التحديث لحظياً لكل الأجهزة المتصلة.
-  if (lan.role === 'host') { data._rev = currentRev() + 1; data._ts = new Date().toISOString(); }
-  fs.writeFileSync(DATA_FILE(), JSON.stringify(data, null, 2), 'utf8');
-  if (lan.role === 'host') broadcastToClients(JSON.stringify(data));
+  const isClient = lan.role === 'client' && lan.hostIp;
+  // العميل يطبّق محلياً دون رفع رقم المراجعة (رقم المضيف هو المرجع ويعود مع البثّ)
+  const applied = applyChangesLocal(diffDocToChanges(data), { bumpRev: !isClient });
+  if (!applied.length) return;
+  if (isClient) postToHost({ changes: applied });
+  else if (lan.role === 'host') broadcastChanges(applied);
 }
 
 // نسخة الواجهة: عند العميل تسحب أحدث حالة من المضيف قبل العرض ثم تعيد الدمج مع الافتراضات.
@@ -657,7 +859,7 @@ async function loadDataForRenderer() {
   const lan = readLanConfig();
   if (lan.role === 'client' && lan.hostIp) {
     const remote = await pullFromHost();
-    if (remote) { try { fs.writeFileSync(DATA_FILE(), JSON.stringify(remote, null, 2), 'utf8'); } catch (e) {} }
+    if (remote) applyChangesLocal(diffDocToChanges(remote), { setRev: remote._rev || 0 });
   }
   return loadData();
 }
@@ -666,12 +868,14 @@ async function loadDataForRenderer() {
 const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups');
 const MAX_BACKUPS = 30;
 
+// النسخة الاحتياطية تبقى بصيغة JSON الكاملة نفسها (قابلة للفتح والاستعادة في أي إصدار)
+// وتُصدَّر من مخزن SQLite بدل نسخ الملف القديم.
 function takeBackup() {
   try {
-    if (!fs.existsSync(DATA_FILE())) return;
+    if (!sdb) return;
     if (!fs.existsSync(BACKUP_DIR())) fs.mkdirSync(BACKUP_DIR(), { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    fs.copyFileSync(DATA_FILE(), path.join(BACKUP_DIR(), `sened-backup-${stamp}.json`));
+    fs.writeFileSync(path.join(BACKUP_DIR(), `sened-backup-${stamp}.json`), JSON.stringify(getDoc(), null, 2), 'utf8');
     const files = fs.readdirSync(BACKUP_DIR()).filter(f => f.startsWith('sened-backup-')).sort();
     while (files.length > MAX_BACKUPS) fs.unlinkSync(path.join(BACKUP_DIR(), files.shift()));
   } catch (e) { console.error('backup error', e); }
@@ -1407,11 +1611,48 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
+// ==========================================================================
+//  التحديث التلقائي (منذ v1.1.0) — عبر صفحة إصدارات GitHub (مستودع عام، بلا تكلفة)
+//  نسخة التثبيت (Setup): electron-updater ينزّل التحديث بصمت ويثبّته عند إغلاق التطبيق.
+//  النسخة المحمولة (Portable): لا تدعم التثبيت الذاتي — تفحص آخر إصدار وتُظهر تنبيهاً فقط.
+// ==========================================================================
+function initAutoUpdate() {
+  if (!app.isPackaged) return; // نسخة التطوير لا تتحدث
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    const checkPortable = async () => {
+      try {
+        const rel = await githubApi(null, 'GET', '/repos/abdselam1/sened-digital/releases/latest');
+        const latest = String(rel.tag_name || '').replace(/^v/, '');
+        if (latest && latest !== app.getVersion() && win && !win.isDestroyed()) {
+          win.webContents.send('update:portable', latest);
+        }
+      } catch (e) { /* بلا إنترنت أو حد معدل — تجاهل بصمت */ }
+    };
+    setTimeout(checkPortable, 30 * 1000);
+    setInterval(checkPortable, 4 * 60 * 60 * 1000);
+    return;
+  }
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true; // يُثبَّت بصمت عند إغلاق التطبيق — بلا أي نافذة
+    autoUpdater.on('update-downloaded', (info) => {
+      if (win && !win.isDestroyed()) win.webContents.send('update:ready', info.version);
+    });
+    autoUpdater.on('error', (e) => console.error('auto-update:', e.message));
+    const check = () => autoUpdater.checkForUpdates().catch(() => {});
+    setTimeout(check, 30 * 1000);              // بعد الإقلاع بنصف دقيقة
+    setInterval(check, 4 * 60 * 60 * 1000);    // ثم كل 4 ساعات
+  } catch (e) { console.error('auto-update init:', e.message); }
+}
+
 app.whenReady().then(() => {
+  initStorage();   // يجب أن يسبق كل شيء — بقية الطبقات تقرأ من المخزن
   applyLanMode();
   createWindow();
   takeBackup();
   checkLicenseStatus();
+  initAutoUpdate();
   setInterval(takeBackup, 60 * 60 * 1000); // نسخة احتياطية إضافية كل ساعة أثناء التشغيل
   setInterval(checkLicenseStatus, 30 * 60 * 1000); // تحقق من حالة الترخيص كل نصف ساعة
 });

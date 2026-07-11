@@ -25,8 +25,11 @@ jobs:
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          # latest.yml + blockmap مطلوبان للتحديث التلقائي (electron-updater يقرؤهما من الإصدار)
           files: |
             dist/*.exe
+            dist/latest.yml
+            dist/*.blockmap
           fail_on_unmatched_files: false
       - uses: actions/upload-artifact@v4
         with:

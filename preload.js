@@ -43,5 +43,7 @@ contextBridge.exposeInMainWorld('sened', {
   lanTest: (ip, port, token) => ipcRenderer.invoke('lan:test', { ip, port, token }),
   lanDiscover: () => ipcRenderer.invoke('lan:discover'),
   lanRegenToken: () => ipcRenderer.invoke('lan:regenToken'),
-  lanKickClient: (id) => ipcRenderer.invoke('lan:kickClient', id)
+  lanKickClient: (id) => ipcRenderer.invoke('lan:kickClient', id),
+  onUpdateReady: (cb) => ipcRenderer.on('update:ready', (e, version) => cb(version)),
+  onUpdatePortable: (cb) => ipcRenderer.on('update:portable', (e, version) => cb(version))
 });

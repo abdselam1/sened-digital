@@ -2716,6 +2716,9 @@ async function onRemoteSync() {
   bridge.onSyncUpdated(onRemoteSync);
   // تنبيه واضح عند فشل وصول تعديل للخادم (بدل الفشل الصامت في السجل فقط)
   bridge.onSyncPostFailed(() => toast(T.syncPostFailed));
+  // التحديث التلقائي: نسخة التثبيت تحدَّث بصمت عند الإغلاق؛ المحمولة تنبيه بالتحميل فقط
+  if (bridge.onUpdateReady) bridge.onUpdateReady((v) => toast(`${T.updateReady} (${v})`));
+  if (bridge.onUpdatePortable) bridge.onUpdatePortable((v) => toast(`${T.updatePortable} (${v})`));
   // مؤشر التزامن في الشريط الجانبي: تحديث دوري خفيف حتى خارج صفحة الإعدادات
   setInterval(async () => {
     try { const cfg = await bridge.lanGetConfig(); lanDeviceName = cfg.deviceName || ''; updateSyncBadge(cfg, await bridge.lanStatus()); } catch (e) {}

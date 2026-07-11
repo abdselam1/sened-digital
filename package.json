@@ -1,7 +1,7 @@
 {
   "name": "sened",
   "productName": "سند",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "سند — نظام إدارة ومحاسبة ذكي ثلاثي اللغة مدعوم بالذكاء الاصطناعي وبوت تلجرام | Sened — AI-powered trilingual business management & accounting system",
   "main": "main.js",
   "author": "abdselam1",
@@ -34,6 +34,13 @@
     "appId": "com.abdselam1.sened",
     "productName": "سند",
     "icon": "assets/icon.ico",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "abdselam1",
+        "repo": "sened-digital"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -68,7 +75,9 @@
     }
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "cors": "^2.8.6",
+    "electron-updater": "^6.8.9",
     "express": "^5.2.1"
   }
 }
