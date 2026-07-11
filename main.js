@@ -542,9 +542,31 @@ function activationSignature(fingerprint) {
 }
 function builtinActivationCode() { return readBuiltinConfig().activationCode || OFFICIAL_ACTIVATION_CODE; }
 
-// بصمة الجهاز الفعلية (اسم الجهاز + عناوين الشبكة MAC) — ثابتة على نفس الجهاز، تتغيّر عند النقل لجهاز آخر.
-// تُستخدم لربط التفعيل بالجهاز: نسخ التطبيق لجهاز آخر يغيّر البصمة فيُطلب كود المطوّر من جديد.
+// بصمة الجهاز الثابتة: MachineGuid من سجل ويندوز — يتولّد عند تنصيب ويندوز نفسه ولا يتغيّر أبداً
+// مهما تغيّرت الشبكة أو أُعيد التشغيل. تُستخدم لربط التفعيل بالجهاز: نسخ التطبيق لجهاز آخر
+// يغيّر البصمة فيُطلب كود المطوّر من جديد.
+let cachedMachineGuid = null;
+function machineGuid() {
+  if (cachedMachineGuid !== null) return cachedMachineGuid;
+  cachedMachineGuid = '';
+  try {
+    const out = require('child_process').execSync(
+      'reg query "HKLM\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid',
+      { encoding: 'utf8', windowsHide: true });
+    const m = out.match(/MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]+)/);
+    if (m) cachedMachineGuid = m[1].toLowerCase();
+  } catch (e) {}
+  return cachedMachineGuid;
+}
 function machineFingerprint() {
+  const guid = machineGuid();
+  if (guid) return crypto.createHash('sha256').update('v2|' + guid).digest('hex');
+  return legacyMachineFingerprint(); // احتياط لغير ويندوز أو فشل قراءة السجل
+}
+// البصمة القديمة (اسم الجهاز + عناوين MAC) — كانت غير ثابتة لأن os.networkInterfaces() لا يُرجع
+// إلا الكروت المتصلة فعلاً: فتح التطبيق قبل اتصال الواي فاي بعد إعادة التشغيل كان يغيّر البصمة
+// فتظهر شاشة كود المطوّر للزبون من جديد. تبقى هنا فقط لقبول التفعيلات السابقة ثم ترحيلها.
+function legacyMachineFingerprint() {
   const os = require('os');
   const macs = Object.values(os.networkInterfaces()).flat()
     .filter(i => i && !i.internal && i.mac && i.mac !== '00:00:00:00:00:00')
@@ -1324,9 +1346,15 @@ ipcMain.handle('activation:status', () => {
   if (!devCode) return { required: false };
   const act = readActivation();
   const fp = machineFingerprint();
-  // مفعَّل فقط إذا: العلَم مضبوط + البصمة تطابق هذا الجهاز + التوقيع سليم (لم يُزوَّر الملف).
-  const activated = !!act.activated && act.fingerprint === fp && act.sig === activationSignature(fp);
-  return { required: !activated };
+  // مفعَّل فقط إذا: العلَم مضبوط + التوقيع سليم (لم يُزوَّر الملف) + البصمة تطابق هذا الجهاز.
+  if (!act.activated || act.sig !== activationSignature(act.fingerprint || '')) return { required: true };
+  if (act.fingerprint === fp) return { required: false };
+  // تفعيل قديم بالبصمة غير الثابتة (MAC): نقبله ونرحّله فوراً للبصمة الثابتة كي لا يُطلب الكود مجدداً.
+  if (act.fingerprint === legacyMachineFingerprint()) {
+    try { writeActivation({ activated: true, fingerprint: fp, at: act.at || new Date().toISOString(), sig: activationSignature(fp) }); } catch (e) {}
+    return { required: false };
+  }
+  return { required: true };
 });
 ipcMain.handle('activation:verify', (e, code) => {
   const devCode = builtinActivationCode();
