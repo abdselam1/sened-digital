@@ -570,6 +570,28 @@ function statusBadge(st) {
   const cls = st === 'paid' ? '' : st === 'partial' ? 'warn' : 'low';
   return `<span class="badge ${cls}">${T[st]}</span>`;
 }
+
+// حقل اختيار محفظة الدفع (يظهر فقط إن وُجدت محافظ — أسماء فقط دون أرصدة ليصلح للكاشير)
+function walletSelectHtml(id, selectedId) {
+  if (!DB.wallets.length) return '';
+  const opts = DB.wallets.map(w => `<option value="${w.id}" ${w.id === selectedId ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
+  return `<div class="field"><label>${T.paymentWallet}</label>
+    <select id="${id}">${opts}<option value="">${T.noWallet}</option></select>
+  </div>`;
+}
+
+// تسجيل حركة محفظة مرتبطة بدفعة فاتورة بيع (إيداع) أو فاتورة شراء (سحب)
+function recordPaymentTx(kind, rec, walletId, amount) {
+  if (!walletId || !(amount > 0)) return;
+  const w = DB.wallets.find(x => x.id === walletId);
+  if (!w) return;
+  const noLabel = kind === 'invoice' ? T.invoiceNo : T.purchaseNo;
+  DB.walletTx.push({
+    id: uid('wt'), walletId, type: kind === 'invoice' ? 'deposit' : 'withdraw',
+    amount, note: `${noLabel} #${rec.number}`, refType: kind, refId: rec.id,
+    date: new Date().toISOString()
+  });
+}
 function isLow(p) { return Number(p.stock) <= Number(p.threshold ?? 3); }
 
 // ---------- لوحة التحكم ----------
@@ -836,6 +858,7 @@ function openInvoiceModal() {
       <div class="field"><label>${T.paidAmount}</label><input id="mPaid" type="number" min="0" placeholder="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPaid').value=invGrandTotal()">${T.payFull}</button></div>
     </div>
+    ${walletSelectHtml('mWallet')}
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveInvoice()">${T.saveInvoice}</button>
@@ -927,17 +950,28 @@ async function saveInvoice() {
   const taxPercent = 0;
   const total = invGrandTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPaid').value || 0)));
+  const walletId = ($('mWallet') || {}).value || '';
+  const wallet = DB.wallets.find(w => w.id === walletId);
   const invNumber = DB.counters.invoice++;
-  DB.invoices.push({
+  const inv = {
     id: uid('i'), number: invNumber,
     customerId: custId, customerName: cust ? cust.name : '',
+    walletId: wallet ? walletId : '', walletName: wallet ? wallet.name : '',
     items, subtotal, discount, taxPercent, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
-  });
+  };
+  DB.invoices.push(inv);
+  recordPaymentTx('invoice', inv, walletId, paidAmount);
   logAudit('create', T.invoices, `#${invNumber}`);
   await persist(); closeModal(); renderAll(); toast(T.invoiceSaved);
 }
 
-async function delInvoice(id) { await softDelete('invoices', id, T.invoices); }
+async function delInvoice(id) {
+  await softDelete('invoices', id, T.invoices, () => {
+    const related = DB.walletTx.filter(t => t.refType === 'invoice' && t.refId === id);
+    DB.walletTx = DB.walletTx.filter(t => !(t.refType === 'invoice' && t.refId === id));
+    return { walletTx: related };
+  });
+}
 
 // ---------- مرتجعات المبيعات ----------
 function openReturnModal(invoiceId) {
@@ -1002,14 +1036,22 @@ function buildInvoiceHtml(inv, kind) {
   const discount = inv.discount || 0;
   const taxPercent = 0;
   const noLabel = kind === 'quote' ? T.quoteNo : T.invoiceNo;
+  // ختم الحالة الإلكتروني (فواتير البيع فقط): مدفوعة / دفع جزئي / غير مدفوعة
+  let stamp = '';
+  if (kind === 'invoice') {
+    const st = inv.status || statusOf(inv.total, inv.paidAmount || 0);
+    const stampMap = { paid: ['stamp-paid', T.stampPaid], partial: ['stamp-partial', T.stampPartial], credit: ['stamp-unpaid', T.stampUnpaid] };
+    if (stampMap[st]) stamp = `<div class="inv-stamp ${stampMap[st][0]}"><span>${stampMap[st][1]}</span></div>`;
+  }
   return `
     <div class="inv-doc tpl-${tpl}" style="--inv-accent:${color}">
+      ${stamp}
       <div class="inv-head">
         ${logo}
         <div class="inv-brand">${esc(DB.settings.businessName || 'سند')}</div>
         ${infoLines.length ? `<div class="inv-company-info">${infoLines.map(esc).join('<br>')}</div>` : ''}
       </div>
-      <div class="inv-meta"><span>${noLabel}: #${inv.number}</span><span>${T.date}: ${inv.date.slice(0, 10)}</span><span>${T.customer}: ${esc(inv.customerName) || T.walkIn}</span></div>
+      <div class="inv-meta"><span>${noLabel}: #${inv.number}</span><span>${T.date}: ${inv.date.slice(0, 10)}</span><span>${T.customer}: ${esc(inv.customerName) || T.walkIn}</span>${kind === 'invoice' && inv.walletName ? `<span>${T.paymentWallet}: ${esc(inv.walletName)}</span>` : ''}</div>
       <table><thead><tr><th>${T.product}</th><th>${T.price}</th><th>${T.qty}</th><th>${T.total}</th></tr></thead>
       <tbody>${inv.items.map(it => `<tr><td>${esc(it.name)}</td><td>${fmt(it.price)}</td><td>${it.qty}</td><td>${fmt(it.total)}</td></tr>`).join('')}</tbody></table>
       <div class="inv-totals-box">
@@ -1223,6 +1265,7 @@ function openPurchaseModal() {
       <div class="field"><label>${T.paidAmount}</label><input id="mPurPaid" type="number" min="0" placeholder="0"></div>
       <div class="field" style="align-self:end"><button type="button" class="btn btn-ghost btn-sm" onclick="$('mPurPaid').value=purTotal()">${T.payFull}</button></div>
     </div>
+    ${walletSelectHtml('mPurWallet')}
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="savePurchase()">${T.save}</button>
@@ -1260,17 +1303,28 @@ async function savePurchase() {
   });
   const total = purTotal();
   const paidAmount = Math.min(total, Math.max(0, Number($('mPurPaid').value || 0)));
+  const walletId = ($('mPurWallet') || {}).value || '';
+  const wallet = DB.wallets.find(w => w.id === walletId);
   const purNumber = DB.counters.purchase++;
-  DB.purchases.push({
+  const pur = {
     id: uid('pu'), number: purNumber,
     supplierId: supId, supplierName: sup ? sup.name : '',
+    walletId: wallet ? walletId : '', walletName: wallet ? wallet.name : '',
     items, total, paidAmount, status: statusOf(total, paidAmount), date: new Date().toISOString()
-  });
+  };
+  DB.purchases.push(pur);
+  recordPaymentTx('purchase', pur, walletId, paidAmount);
   logAudit('create', T.purchases, `#${purNumber}`);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delPurchase(id) { await softDelete('purchases', id, T.purchases); }
+async function delPurchase(id) {
+  await softDelete('purchases', id, T.purchases, () => {
+    const related = DB.walletTx.filter(t => t.refType === 'purchase' && t.refId === id);
+    DB.walletTx = DB.walletTx.filter(t => !(t.refType === 'purchase' && t.refId === id));
+    return { walletTx: related };
+  });
+}
 
 // ---------- تسديد الديون (فواتير/مشتريات) ----------
 function openCollectModal(kind, id) {
@@ -1280,6 +1334,7 @@ function openCollectModal(kind, id) {
   openModal(`<h3>${T.collectPayment}</h3>
     <p class="muted">${T.remaining}: <b style="color:var(--gold-light)">${fmt(remaining)} ${cur()}</b></p>
     <div class="field" style="margin-top:12px"><label>${T.amount}</label><input id="mCollect" type="number" min="0" value="${remaining}"></div>
+    ${walletSelectHtml('mCollectWallet', rec.walletId)}
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="doCollect('${kind}','${id}')">${T.save}</button>
@@ -1291,8 +1346,14 @@ async function doCollect(kind, id) {
   if (!amount) return;
   const list = kind === 'invoice' ? DB.invoices : DB.purchases;
   const rec = list.find(x => x.id === id);
+  // المبلغ المُطبَّق فعلياً (لا يتجاوز المتبقي) — هو ما يُسجَّل في المحفظة
+  const applied = Math.min(amount, Math.max(0, rec.total - (rec.paidAmount || 0)));
   rec.paidAmount = Math.min(rec.total, (rec.paidAmount || 0) + amount);
   rec.status = statusOf(rec.total, rec.paidAmount);
+  const walletId = ($('mCollectWallet') || {}).value || '';
+  const wallet = DB.wallets.find(w => w.id === walletId);
+  if (wallet) { rec.walletId = walletId; rec.walletName = wallet.name; }
+  recordPaymentTx(kind, rec, walletId, applied);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 

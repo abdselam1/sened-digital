@@ -464,6 +464,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold); box-shado
   .inv-doc {
     background: #fff; color: #111;
     font-family: 'Cairo', 'Segoe UI', sans-serif;
+    position: relative;
   }
   .inv-doc .inv-head { text-align: center; padding-bottom: 16px; margin-bottom: 16px; }
   .inv-doc .inv-logo { max-height: 70px; display: block; margin: 0 auto 10px; object-fit: contain; }
@@ -477,6 +478,24 @@ input:focus, select:focus, textarea:focus { border-color: var(--gold); box-shado
   .inv-doc .inv-thanks { text-align: center; margin-top: 30px; color: #666; font-size: .85rem; padding-top: 14px; }
   .inv-doc .inv-totals-box { margin-top: 14px; padding-top: 10px; }
   .inv-doc .inv-row { display: flex; justify-content: space-between; font-size: .95rem; padding: 3px 0; color: #333; }
+
+  /* ====== ختم حالة الدفع الإلكتروني (مدفوعة / دفع جزئي / غير مدفوعة) ====== */
+  .inv-doc .inv-stamp {
+    position: absolute; top: 46%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-14deg);
+    padding: 6px; border-radius: 12px;
+    opacity: .5; pointer-events: none; z-index: 5;
+    border: 3px solid currentColor;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .inv-doc .inv-stamp span {
+    display: block; border: 1.5px solid currentColor; border-radius: 8px;
+    padding: 6px 28px; font-size: 1.9rem; font-weight: 900;
+    letter-spacing: 2px; white-space: nowrap; text-transform: uppercase;
+  }
+  .inv-doc .inv-stamp.stamp-paid { color: #1f9d55; }
+  .inv-doc .inv-stamp.stamp-partial { color: #d9820c; }
+  .inv-doc .inv-stamp.stamp-unpaid { color: #d64545; }
 
   /* كلاسيكي: ترويسة بحد ذهبي، رأس جدول ملوّن */
   .inv-doc.tpl-classic .inv-head { border-bottom: 3px solid var(--inv-accent); }
