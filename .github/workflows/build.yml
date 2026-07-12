@@ -41,7 +41,16 @@ jobs:
       - name: Publish builds to dist branch
         shell: bash
         run: |
-          mkdir -p /tmp/distpub && cp dist/*.exe /tmp/distpub/
+          mkdir -p /tmp/distpub
+          # GitHub يرفض عبر git أي ملف >100م.ب. المثبّت العالمي (x64+ia32) يتجاوزها (~157م.ب)،
+          # فلا نضعه في فرع dist ويبقى على صفحة Releases (منها يقرأ التحديث التلقائي أصلاً).
+          # ننسخ الملفات الأصغر من الحدّ فقط (النسخة المحمولة) كي لا تفشل الخطوة أبداً.
+          for f in dist/*.exe; do
+            [ -e "$f" ] || continue
+            sz=$(stat -c%s "$f")
+            if [ "$sz" -lt 99000000 ]; then cp "$f" /tmp/distpub/; else echo "skip >100MB (kept on Releases): $f ($sz bytes)"; fi
+          done
+          if [ -z "$(ls -A /tmp/distpub 2>/dev/null)" ]; then echo "no files under 100MB to mirror; skipping dist branch"; exit 0; fi
           cd /tmp/distpub
           git init -b dist
           git config user.name "github-actions"
