@@ -19,7 +19,9 @@ jobs:
         with:
           node-version: 20
       - run: npm install --no-audit --no-fund
-      - run: npx electron-builder --win nsis portable --publish never
+      # الأهداف والمعماريات تُقرأ من build.win في package.json:
+      # مثبّت nsis عالمي (x64 + ia32 في ملف واحد) + نسخة محمولة x64
+      - run: npx electron-builder --win --publish never
       - name: List artifacts
         run: dir dist
       - uses: softprops/action-gh-release@v2

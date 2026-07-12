@@ -580,15 +580,17 @@ function walletSelectHtml(id, selectedId) {
   </div>`;
 }
 
-// تسجيل حركة محفظة مرتبطة بدفعة فاتورة بيع (إيداع) أو فاتورة شراء (سحب)
+// تسجيل حركة محفظة مرتبطة بدفعة فاتورة بيع (إيداع) أو فاتورة شراء/مصروف (سحب)
 function recordPaymentTx(kind, rec, walletId, amount) {
   if (!walletId || !(amount > 0)) return;
   const w = DB.wallets.find(x => x.id === walletId);
   if (!w) return;
-  const noLabel = kind === 'invoice' ? T.invoiceNo : T.purchaseNo;
+  const note = kind === 'expense'
+    ? `${T.expenses}: ${rec.desc || ''}`
+    : `${kind === 'invoice' ? T.invoiceNo : T.purchaseNo} #${rec.number}`;
   DB.walletTx.push({
     id: uid('wt'), walletId, type: kind === 'invoice' ? 'deposit' : 'withdraw',
-    amount, note: `${noLabel} #${rec.number}`, refType: kind, refId: rec.id,
+    amount, note, refType: kind, refId: rec.id,
     date: new Date().toISOString()
   });
 }
@@ -1726,6 +1728,7 @@ function openExpenseModal() {
       </select>
     </div>
     <p class="muted" id="expPreview"></p>` : ''}
+    ${walletSelectHtml('mExpWallet')}
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
       <button class="btn btn-gold" onclick="saveExpense()">${T.save}</button>
@@ -1753,12 +1756,26 @@ async function saveExpense() {
     amount = inputAmount * rate;
     originalAmount = inputAmount; originalCurrency = code;
   }
-  DB.expenses.push({ id: uid('ex'), desc, amount, originalAmount, originalCurrency, category, date: new Date().toISOString() });
+  const walletId = ($('mExpWallet') || {}).value || '';
+  const wallet = DB.wallets.find(w => w.id === walletId);
+  const exp = {
+    id: uid('ex'), desc, amount, originalAmount, originalCurrency, category,
+    walletId: wallet ? walletId : '', walletName: wallet ? wallet.name : '',
+    date: new Date().toISOString()
+  };
+  DB.expenses.push(exp);
+  recordPaymentTx('expense', exp, walletId, amount);
   logAudit('create', T.expenses, desc);
   await persist(); closeModal(); renderAll(); toast(T.saved);
 }
 
-async function delExpense(id) { await softDelete('expenses', id, T.expenses); }
+async function delExpense(id) {
+  await softDelete('expenses', id, T.expenses, () => {
+    const related = DB.walletTx.filter(t => t.refType === 'expense' && t.refId === id);
+    DB.walletTx = DB.walletTx.filter(t => !(t.refType === 'expense' && t.refId === id));
+    return { walletTx: related };
+  });
+}
 
 // ---------- التقارير ----------
 function renderReports() {
@@ -2345,6 +2362,46 @@ function updateInvoiceDesignPreview() {
 async function saveInvoiceDesign() {
   DB.settings.invoice = { template: $('setInvTemplate').value, color: $('setInvColor').value };
   await persist();
+  toast(T.saved);
+}
+
+// مظهر الفاتورة (ألوان/قالب) — متاح للكاشير والمحاسب مباشرةً من صفحة الفواتير
+// دون الحاجة لصفحة الإعدادات (المحصورة بالمدير). يكتب نفس DB.settings.invoice.
+function openInvoiceAppearanceModal() {
+  const iv = DB.settings.invoice || { template: 'classic', color: '#C8A45C' };
+  const tpls = [['classic', T.tplClassic], ['modern', T.tplModern], ['minimal', T.tplMinimal], ['bold', T.tplBold]];
+  openModal(`<h3>${T.invoiceAppearance}</h3>
+    <div class="grid2">
+      <div class="field"><label>${T.invoiceTemplate}</label>
+        <select id="mInvTpl" onchange="updateInvoiceApprPreview()">
+          ${tpls.map(([v, l]) => `<option value="${v}" ${iv.template === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>${T.invoiceColor}</label>
+        <input id="mInvColor" type="color" value="${iv.color || '#C8A45C'}" oninput="updateInvoiceApprPreview()">
+      </div>
+    </div>
+    <div id="invApprPreview" style="margin-top:12px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">${T.cancel}</button>
+      <button class="btn btn-gold" onclick="saveInvoiceAppearance()">${T.save}</button>
+    </div>`);
+  updateInvoiceApprPreview();
+}
+
+function updateInvoiceApprPreview() {
+  const el = $('invApprPreview');
+  if (!el) return;
+  const prev = DB.settings.invoice;
+  DB.settings.invoice = { template: $('mInvTpl').value, color: $('mInvColor').value };
+  el.innerHTML = `<div class="inv-preview-modal" style="max-height:320px">${buildInvoiceHtml(sampleInvoiceForPreview())}</div>`;
+  DB.settings.invoice = prev;
+}
+
+async function saveInvoiceAppearance() {
+  DB.settings.invoice = { template: $('mInvTpl').value, color: $('mInvColor').value };
+  await persist();
+  closeModal();
   toast(T.saved);
 }
 
